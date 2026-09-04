@@ -223,6 +223,12 @@ fn run_app() -> anyhow::Result<()> {
 
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(|app| {
+        // Activating an already-running instance must raise the window it has,
+        // not build a second one against the same database.
+        if let Some(window) = app.windows().first() {
+            window.present();
+            return;
+        }
         if let Err(e) = build_window(app) {
             eprintln!("omachess: {e:#}");
         }

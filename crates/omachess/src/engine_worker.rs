@@ -66,47 +66,73 @@ impl EngineWorker {
             .unwrap_or_else(|| "engine".into());
 
         thread::spawn(move || {
-            let mut engine = match Engine::spawn(&path) {
-                Ok(engine) => engine,
-                Err(e) => {
-                    let _ = reply_tx.send(Reply::Failed(format!("{e:#}")));
-                    return;
-                }
-            };
-            // A capped opponent and a full-strength analyst are the same binary
-            // reconfigured, so the current cap is tracked to avoid needless
-            // option changes between moves.
+            // The engine is started lazily and replaced if it dies, so one bad
+            // spawn — a busy sandbox, a killed process — does not end play for
+            // the rest of the session.
+            let mut engine: Option<Engine> = None;
             let mut current_elo: Option<u32> = None;
 
             while let Ok(request) = request_rx.recv() {
+                if engine.is_none() {
+                    match Engine::spawn(&path) {
+                        Ok(started) => {
+                            engine = Some(started);
+                            current_elo = None;
+                        }
+                        Err(e) => {
+                            if reply_tx.send(Reply::Failed(format!("{e:#}"))).is_err() {
+                                return;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                let Some(active) = engine.as_mut() else {
+                    continue;
+                };
+
                 let reply = match request {
                     Request::Move { fen, moves, elo } => {
                         if current_elo != Some(elo) {
-                            if let Err(e) = engine.limit_strength(Some(elo)) {
-                                let _ = reply_tx.send(Reply::Failed(format!("{e:#}")));
-                                continue;
+                            match active.limit_strength(Some(elo)) {
+                                Ok(()) => current_elo = Some(elo),
+                                Err(e) => {
+                                    engine = None;
+                                    let _ = reply_tx.send(Reply::Failed(format!("{e:#}")));
+                                    continue;
+                                }
                             }
-                            current_elo = Some(elo);
                         }
-                        match engine.analyse(&fen, &moves, Limit::Movetime(MOVE_TIME)) {
+                        match active.analyse(&fen, &moves, Limit::Movetime(MOVE_TIME)) {
                             Ok(analysis) => match analysis.best_move {
                                 Some(mv) => Reply::Move(mv),
-                                None => Reply::Failed("engine returned no move".into()),
+                                None => Reply::Failed("the engine returned no move".into()),
                             },
-                            Err(e) => Reply::Failed(format!("{e:#}")),
+                            Err(e) => {
+                                // A protocol error means the process is no
+                                // longer trustworthy; start a fresh one next time.
+                                engine = None;
+                                Reply::Failed(format!("{e:#}"))
+                            }
                         }
                     }
                     Request::Review { fen, moves, player } => {
                         if current_elo.is_some() {
-                            if let Err(e) = engine.limit_strength(None) {
-                                let _ = reply_tx.send(Reply::Failed(format!("{e:#}")));
-                                continue;
+                            match active.limit_strength(None) {
+                                Ok(()) => current_elo = None,
+                                Err(e) => {
+                                    engine = None;
+                                    let _ = reply_tx.send(Reply::Failed(format!("{e:#}")));
+                                    continue;
+                                }
                             }
-                            current_elo = None;
                         }
-                        match analyse_game(&mut engine, &fen, &moves, player) {
+                        match analyse_game(active, &fen, &moves, player) {
                             Ok(analysis) => Reply::Review(analysis),
-                            Err(e) => Reply::Failed(format!("{e:#}")),
+                            Err(e) => {
+                                engine = None;
+                                Reply::Failed(format!("{e:#}"))
+                            }
                         }
                     }
                 };
@@ -167,51 +193,68 @@ impl EngineWorker {
 mod tests {
     use super::*;
 
-    /// A worker whose engine never starts must report the failure once and then
-    /// fall silent. Reporting it forever turns any `while let Some(..) = poll()`
-    /// into an infinite loop, and on the UI thread that is a frozen window.
-    #[test]
-    fn a_dead_worker_reports_once_then_stops() {
-        let worker = EngineWorker::spawn(PathBuf::from("/nonexistent/definitely-not-an-engine"));
-
-        // Give the thread a moment to fail and exit, collecting everything it
-        // says. Exactly one failure should come out, however it exits.
-        let mut replies = Vec::new();
-        for _ in 0..200 {
+    fn drain(worker: &EngineWorker, budget: usize) -> Vec<Reply> {
+        let mut out = Vec::new();
+        for _ in 0..budget {
             while let Some(reply) = worker.poll() {
-                replies.push(reply);
-                if replies.len() > 8 {
-                    panic!("worker produced a flood of replies");
-                }
+                out.push(reply);
+                assert!(out.len() < 16, "worker produced a flood of replies");
             }
-            if worker.is_finished() {
+            if !out.is_empty() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(replies.len(), 1, "expected exactly one failure report");
-        assert!(matches!(replies[0], Reply::Failed(_)));
-
-        // Every subsequent poll must be None, however many times it is called.
-        for i in 0..1000 {
-            assert!(
-                worker.poll().is_none(),
-                "worker kept reporting after it died (poll {i})"
-            );
-        }
-        assert!(worker.is_finished());
+        out
     }
 
-    #[test]
-    fn sending_to_a_dead_worker_is_refused_rather_than_blocking() {
-        let worker = EngineWorker::spawn(PathBuf::from("/nonexistent/definitely-not-an-engine"));
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        // The request channel is closed with the thread; this must return
-        // rather than wait for a reader that will never come.
-        let _ = worker.send(Request::Move {
+    fn request() -> Request {
+        Request::Move {
             fen: omachess_core::game::START_FEN.to_owned(),
             moves: Vec::new(),
             elo: 1320,
-        });
+        }
+    }
+
+    /// A failing engine must produce one report per request, never a stream.
+    /// A stream turns any `while let Some(..) = poll()` into an infinite loop,
+    /// and on the UI thread that is a frozen window.
+    #[test]
+    fn a_failing_engine_reports_once_per_request_not_continuously() {
+        let worker = EngineWorker::spawn(PathBuf::from("/nonexistent/definitely-not-an-engine"));
+        assert!(worker.send(request()));
+
+        let replies = drain(&worker, 200);
+        assert_eq!(replies.len(), 1, "expected exactly one failure");
+        assert!(matches!(replies[0], Reply::Failed(_)));
+
+        for i in 0..1000 {
+            assert!(worker.poll().is_none(), "kept talking after the report (poll {i})");
+        }
+    }
+
+    /// And it must stay usable: a bad spawn should not end play for the rest of
+    /// the session, so the next request tries again.
+    #[test]
+    fn a_failed_spawn_is_retried_on_the_next_request() {
+        let worker = EngineWorker::spawn(PathBuf::from("/nonexistent/definitely-not-an-engine"));
+        assert!(worker.send(request()));
+        assert_eq!(drain(&worker, 200).len(), 1);
+
+        assert!(worker.send(request()), "the worker should still accept work");
+        let second = drain(&worker, 200);
+        assert_eq!(second.len(), 1, "the retry should report too");
+        assert!(matches!(second[0], Reply::Failed(_)));
+        assert!(!worker.is_finished(), "the worker must still be alive");
+    }
+
+    #[test]
+    fn sending_never_blocks_the_caller() {
+        let worker = EngineWorker::spawn(PathBuf::from("/nonexistent/definitely-not-an-engine"));
+        // Queueing work must return immediately whatever the engine is doing;
+        // this runs on the UI thread.
+        for _ in 0..50 {
+            let _ = worker.send(request());
+        }
     }
 }

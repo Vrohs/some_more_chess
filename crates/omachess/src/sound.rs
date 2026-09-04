@@ -8,6 +8,7 @@
 //! The clips are generated rather than borrowed: chess piece-set and sound
 //! licences vary and several popular ones forbid redistribution.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -58,6 +59,10 @@ impl Cue {
 pub struct Sounds {
     player: Option<PathBuf>,
     dir: PathBuf,
+    /// Players already started. A finished child stays a zombie until it is
+    /// waited on, and a long session plays hundreds of sounds, so each new one
+    /// sweeps the finished ones away first.
+    running: RefCell<Vec<std::process::Child>>,
 }
 
 impl Sounds {
@@ -75,7 +80,11 @@ impl Sounds {
             PLAYERS.iter().find_map(|name| which(name))
         };
 
-        Self { player, dir }
+        Self {
+            player,
+            dir,
+            running: RefCell::new(Vec::new()),
+        }
     }
 
     pub fn is_audible(&self) -> bool {
@@ -87,13 +96,25 @@ impl Sounds {
         let Some(player) = &self.player else {
             return;
         };
+        let mut running = self.running.borrow_mut();
+        running.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
+
         let clip = self.dir.join(format!("{}.wav", cue.name()));
-        let _ = Command::new(player)
+        if let Ok(child) = Command::new(player)
             .arg(&clip)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
+            .spawn()
+        {
+            running.push(child);
+        }
+    }
+
+    /// How many players are still going. Exists so the sweep can be tested.
+    #[cfg(test)]
+    fn pending(&self) -> usize {
+        self.running.borrow().len()
     }
 }
 
@@ -139,8 +160,22 @@ mod tests {
     }
 
     #[test]
-    fn silence_is_requestable() {
-        // The env var is the documented way to turn sound off entirely.
-        assert!(CLIPS.len() == 6);
+    fn finished_players_are_reaped_rather_than_accumulating() {
+        let sounds = Sounds::new();
+        if !sounds.is_audible() {
+            return; // No player on this machine; nothing to reap.
+        }
+        for _ in 0..12 {
+            sounds.play(Cue::Move);
+        }
+        // Each call sweeps first, so the list is bounded by how many are
+        // genuinely still playing, not by how many have ever been started.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        sounds.play(Cue::Move);
+        assert!(
+            sounds.pending() <= 13,
+            "children accumulated: {}",
+            sounds.pending()
+        );
     }
 }

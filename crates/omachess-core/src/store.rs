@@ -168,7 +168,47 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA).context("applying schema")?;
-        Ok(Self { conn })
+        let store = Self { conn };
+        store.migrate()?;
+        Ok(store)
+    }
+
+    /// Bring an existing database up to the current schema.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` alone cannot alter a table that already
+    /// exists, so the version is recorded and each step applied in order. With
+    /// several million rows a rebuild is a four-minute import, which is worth
+    /// avoiding for a column addition.
+    fn migrate(&self) -> Result<()> {
+        let version: u32 =
+            self.conn
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as u32;
+
+        // Steps are appended here and never renumbered or edited once shipped.
+        let steps: [&str; 0] = [];
+
+        for (index, sql) in steps.iter().enumerate() {
+            let step = index as u32 + 1;
+            if version < step {
+                self.conn
+                    .execute_batch(sql)
+                    .with_context(|| format!("applying migration {step}"))?;
+            }
+        }
+
+        let target = steps.len() as u32;
+        if version < target {
+            self.conn
+                .pragma_update(None, "user_version", i64::from(target))?;
+        }
+        Ok(())
+    }
+
+    /// The schema version this database is at.
+    pub fn schema_version(&self) -> Result<u32> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as u32)
     }
 
     // -- puzzles ---------------------------------------------------------
