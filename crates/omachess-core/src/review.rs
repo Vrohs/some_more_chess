@@ -242,9 +242,12 @@ impl GameAnalysis {
 
     /// The moves worth drilling, worst first.
     pub fn drillable(&self) -> Vec<&MoveAnalysis> {
-        let mut out: Vec<&MoveAnalysis> =
-            self.moves.iter().filter(|m| m.is_drillable()).collect();
-        out.sort_by(|a, b| b.lost().partial_cmp(&a.lost()).unwrap_or(std::cmp::Ordering::Equal));
+        let mut out: Vec<&MoveAnalysis> = self.moves.iter().filter(|m| m.is_drillable()).collect();
+        out.sort_by(|a, b| {
+            b.lost()
+                .partial_cmp(&a.lost())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         out
     }
 }
@@ -301,7 +304,9 @@ pub fn analyse_game(
         let fen_before = fen_of(&position);
         let mover = position.turn();
 
-        let uci: UciMove = played.parse().with_context(|| format!("bad move {played}"))?;
+        let uci: UciMove = played
+            .parse()
+            .with_context(|| format!("bad move {played}"))?;
         let mv = uci
             .to_move(&position)
             .map_err(|e| anyhow!("move {played} is not legal at ply {ply}: {e}"))?;
@@ -336,7 +341,11 @@ pub fn analyse_game(
                     best_line: before.pv.clone(),
                     phase: phase_of(&position, ply),
                     win_before,
-                    win_after: if matched_engine { win_before } else { win_after },
+                    win_after: if matched_engine {
+                        win_before
+                    } else {
+                        win_after
+                    },
                     severity,
                 });
             }
@@ -371,10 +380,7 @@ pub fn confirm_drillable(
         if !review.is_drillable() {
             continue;
         }
-        let deeper = evaluator.eval(
-            &review.setup_fen,
-            std::slice::from_ref(&review.setup_move),
-        )?;
+        let deeper = evaluator.eval(&review.setup_fen, std::slice::from_ref(&review.setup_move))?;
         let confirmed = deeper
             .best_move
             .as_deref()
@@ -397,6 +403,9 @@ pub fn confirm_drillable(
 /// The shape matches the Lichess export exactly — a position, the opponent move
 /// that created it, then the move to find — so generated puzzles flow through
 /// the same solving, scheduling and fluency code as downloaded ones.
+/// The theme marking a puzzle taken from the player's own game.
+pub const OWN_GAME_THEME: &str = "fromMyGame";
+
 pub fn puzzle_from(review: &MoveAnalysis, rating: u32, id: &str) -> Puzzle {
     Puzzle {
         id: id.to_owned(),
@@ -407,7 +416,7 @@ pub fn puzzle_from(review: &MoveAnalysis, rating: u32, id: &str) -> Puzzle {
         popularity: 0,
         nb_plays: 0,
         themes: vec![
-            "fromMyGame".into(),
+            OWN_GAME_THEME.into(),
             review
                 .severity
                 .map(Severity::label)
@@ -500,7 +509,10 @@ mod tests {
             blunder_after: "g1h3".into(),
         };
         // 1. d4 d5 2. Nh3?? — the third player move is the bad one.
-        let moves: Vec<String> = ["d2d4", "d7d5", "g1h3"].iter().map(|m| m.to_string()).collect();
+        let moves: Vec<String> = ["d2d4", "d7d5", "g1h3"]
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
         let analysis = analyse_game(
             &mut evaluator,
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -623,9 +635,7 @@ mod tests {
             severity: None,
             ..drillable_move()
         };
-        let mut analysis = GameAnalysis {
-            moves: vec![quiet],
-        };
+        let mut analysis = GameAnalysis { moves: vec![quiet] };
         let mut evaluator = FixedEvaluator {
             best: "anything",
             pv: Vec::new(),
@@ -770,7 +780,10 @@ pub const MIN_TIMED_MOVES: usize = 8;
 /// `times` holds one entry per move the player made, in order. A move's index
 /// is derived from its ply rather than its position in the analysis, so a move
 /// the engine failed to score cannot shift every later pairing.
-pub fn time_pressure(moves: &[MoveAnalysis], times: &[std::time::Duration]) -> Option<TimePressure> {
+pub fn time_pressure(
+    moves: &[MoveAnalysis],
+    times: &[std::time::Duration],
+) -> Option<TimePressure> {
     let paired: Vec<(&MoveAnalysis, std::time::Duration)> = moves
         .iter()
         .filter_map(|m| times.get(m.ply / 2).map(|t| (m, *t)))
@@ -784,8 +797,7 @@ pub fn time_pressure(moves: &[MoveAnalysis], times: &[std::time::Duration]) -> O
     sorted.sort();
     let median = sorted[sorted.len() / 2];
 
-    let (quick, considered): (Vec<_>, Vec<_>) =
-        paired.iter().partition(|(_, t)| *t < median);
+    let (quick, considered): (Vec<_>, Vec<_>) = paired.iter().partition(|(_, t)| *t < median);
     if quick.is_empty() || considered.is_empty() {
         return None;
     }
@@ -846,7 +858,11 @@ mod time_tests {
             setup_fen: String::new(),
             setup_move: String::new(),
             played: "a2a3".into(),
-            best: if lost > 0.0 { "b2b3".into() } else { "a2a3".into() },
+            best: if lost > 0.0 {
+                "b2b3".into()
+            } else {
+                "a2a3".into()
+            },
             best_line: Vec::new(),
             phase: Phase::Middlegame,
             win_before: 0.5,

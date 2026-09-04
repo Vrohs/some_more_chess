@@ -116,6 +116,20 @@ impl Session {
         }
 
         let target = store.personal_rating()?.round().max(0.0) as u32;
+
+        // Positions lifted out of your own losses are the material a coach
+        // would reach for first, and there are only ever a few dozen of them,
+        // so they have to be asked for by name or they are never served.
+        if store.own_mistakes_mode()? {
+            if let Some(puzzle) =
+                store.unseen_near_rating(target, Some(crate::review::OWN_GAME_THEME))?
+            {
+                return Ok(Some(puzzle));
+            }
+            // Solved out: fall through rather than stalling, and let the
+            // caller notice the stock is empty.
+        }
+
         if let Some(theme) = self.weakest_theme(store)? {
             if let Some(puzzle) = store.unseen_near_rating(target, Some(&theme))? {
                 return Ok(Some(puzzle));

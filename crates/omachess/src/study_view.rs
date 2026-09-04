@@ -61,10 +61,7 @@ pub struct StudyView {
 }
 
 impl StudyView {
-    pub fn new(
-        pieces: Option<Rc<PieceSet>>,
-        engine: Option<std::path::PathBuf>,
-    ) -> Rc<Self> {
+    pub fn new(pieces: Option<Rc<PieceSet>>, engine: Option<std::path::PathBuf>) -> Rc<Self> {
         let board = BoardView::new(pieces);
         let worker = engine.map(EngineWorker::spawn);
 
@@ -89,13 +86,21 @@ impl StudyView {
             .build();
         heading.add_css_class("omachess-status");
 
-        let opening = Label::builder().halign(Align::Start).wrap(true).max_width_chars(38).build();
+        let opening = Label::builder()
+            .halign(Align::Start)
+            .wrap(true)
+            .max_width_chars(38)
+            .build();
         opening.add_css_class("dim-label");
 
         let evaluation = Label::builder().halign(Align::Start).build();
         evaluation.add_css_class("title-2");
 
-        let best = Label::builder().halign(Align::Start).wrap(true).max_width_chars(38).build();
+        let best = Label::builder()
+            .halign(Align::Start)
+            .wrap(true)
+            .max_width_chars(38)
+            .build();
         let variation = Label::builder()
             .halign(Align::Start)
             .wrap(true)
@@ -198,7 +203,12 @@ impl StudyView {
             }
         });
 
-        for (button, step) in [(&first, Step::Start), (&prev, Step::Back), (&next, Step::Forward), (&last, Step::End)] {
+        for (button, step) in [
+            (&first, Step::Start),
+            (&prev, Step::Back),
+            (&next, Step::Forward),
+            (&last, Step::End),
+        ] {
             let weak: Weak<Self> = Rc::downgrade(&view);
             button.connect_clicked(move |_| {
                 if let Some(view) = weak.upgrade() {
@@ -260,18 +270,22 @@ impl StudyView {
         let dialog = gtk4::FileDialog::builder().title("Open a PGN").build();
         let window = anchor.root().and_downcast::<gtk4::Window>();
         let weak: Weak<Self> = Rc::downgrade(self);
-        dialog.open(window.as_ref(), gtk4::gio::Cancellable::NONE, move |result| {
-            let Some(view) = weak.upgrade() else {
-                return;
-            };
-            let Ok(file) = result else {
-                return; // Cancelled.
-            };
-            let Some(path) = file.path() else {
-                return;
-            };
-            view.load_file(&path);
-        });
+        dialog.open(
+            window.as_ref(),
+            gtk4::gio::Cancellable::NONE,
+            move |result| {
+                let Some(view) = weak.upgrade() else {
+                    return;
+                };
+                let Ok(file) = result else {
+                    return; // Cancelled.
+                };
+                let Some(path) = file.path() else {
+                    return;
+                };
+                view.load_file(&path);
+            },
+        );
     }
 
     /// Open a PGN by path, for a file named on the command line.
@@ -283,14 +297,16 @@ impl StudyView {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(e) => {
-                self.heading.set_label(&format!("Could not read that file: {e}"));
+                self.heading
+                    .set_label(&format!("Could not read that file: {e}"));
                 return;
             }
         };
         let games = match omachess_core::pgn::read_all(&bytes) {
             Ok(games) => games,
             Err(e) => {
-                self.heading.set_label(&format!("Could not read that PGN: {e}"));
+                self.heading
+                    .set_label(&format!("Could not read that PGN: {e}"));
                 return;
             }
         };
@@ -313,8 +329,7 @@ impl StudyView {
             })
             .collect();
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        self.picker
-            .set_model(Some(&gtk4::StringList::new(&refs)));
+        self.picker.set_model(Some(&gtk4::StringList::new(&refs)));
         self.picker.set_visible(games.len() > 1);
 
         *self.games.borrow_mut() = games;
@@ -365,22 +380,24 @@ impl StudyView {
     /// Redraw everything for the position now being looked at, and ask the
     /// engine what it thinks of it.
     fn refresh(self: &Rc<Self>) {
-        let Some((position, last, played, moves_so_far, next_san, index, total, at_start, at_end)) = ({
-            let walk = self.walk.borrow();
-            walk.as_ref().map(|w| {
-                (
-                    w.position().clone(),
-                    w.last_move(),
-                    w.played_san().to_vec(),
-                    w.moves_so_far().to_vec(),
-                    w.next_san().map(str::to_owned),
-                    w.index(),
-                    w.len(),
-                    w.at_start(),
-                    w.at_end(),
-                )
+        let Some((position, last, played, moves_so_far, next_san, index, total, at_start, at_end)) =
+            ({
+                let walk = self.walk.borrow();
+                walk.as_ref().map(|w| {
+                    (
+                        w.position().clone(),
+                        w.last_move(),
+                        w.played_san().to_vec(),
+                        w.moves_so_far().to_vec(),
+                        w.next_san().map(str::to_owned),
+                        w.index(),
+                        w.len(),
+                        w.at_start(),
+                        w.at_end(),
+                    )
+                })
             })
-        }) else {
+        else {
             return;
         };
 
@@ -428,7 +445,12 @@ impl StudyView {
             self.pending.set(true);
             return;
         }
-        let Some(moves) = self.walk.borrow().as_ref().map(|w| w.moves_so_far().to_vec()) else {
+        let Some(moves) = self
+            .walk
+            .borrow()
+            .as_ref()
+            .map(|w| w.moves_so_far().to_vec())
+        else {
             return;
         };
         // Tag the request so a reply for a position already left cannot be
@@ -498,7 +520,10 @@ impl StudyView {
                     "Played: {played}    Engine prefers: {}",
                     san.first().cloned().unwrap_or_default()
                 ),
-                None => format!("Engine prefers: {}", san.first().cloned().unwrap_or_default()),
+                None => format!(
+                    "Engine prefers: {}",
+                    san.first().cloned().unwrap_or_default()
+                ),
             });
         }
         let line = to_san(&position, &analysis.pv);
@@ -538,10 +563,20 @@ fn to_san(position: &Chess, moves: &[String]) -> Vec<String> {
 /// State the evaluation from White's point of view, as every chess book does,
 /// rather than from whoever happens to be moving.
 fn describe_score(score: Score, mover: shakmaty::Color) -> String {
-    let flip = |v: f64| if mover == shakmaty::Color::White { v } else { -v };
+    let flip = |v: f64| {
+        if mover == shakmaty::Color::White {
+            v
+        } else {
+            -v
+        }
+    };
     match score {
         Score::Mate(n) => {
-            let n = if mover == shakmaty::Color::White { n } else { -n };
+            let n = if mover == shakmaty::Color::White {
+                n
+            } else {
+                -n
+            };
             if n >= 0 {
                 format!("Mate in {n} for White")
             } else {
@@ -596,14 +631,26 @@ mod tests {
 
     #[test]
     fn mate_names_the_side_delivering_it() {
-        assert_eq!(describe_score(Score::Mate(3), Color::White), "Mate in 3 for White");
-        assert_eq!(describe_score(Score::Mate(3), Color::Black), "Mate in 3 for Black");
-        assert_eq!(describe_score(Score::Mate(-2), Color::White), "Mate in 2 for Black");
+        assert_eq!(
+            describe_score(Score::Mate(3), Color::White),
+            "Mate in 3 for White"
+        );
+        assert_eq!(
+            describe_score(Score::Mate(3), Color::Black),
+            "Mate in 3 for Black"
+        );
+        assert_eq!(
+            describe_score(Score::Mate(-2), Color::White),
+            "Mate in 2 for Black"
+        );
     }
 
     #[test]
     fn engine_moves_become_readable_notation() {
-        let line: Vec<String> = ["e2e4", "e7e5", "g1f3"].iter().map(|m| m.to_string()).collect();
+        let line: Vec<String> = ["e2e4", "e7e5", "g1f3"]
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
         assert_eq!(to_san(&Chess::default(), &line), ["e4", "e5", "Nf3"]);
     }
 

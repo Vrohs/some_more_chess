@@ -78,7 +78,13 @@ pub fn slope_chart(points: Vec<SlopePoint>) -> DrawingArea {
         let fg = ink(area);
         if points.is_empty() || w < 120.0 {
             set(cr, fg, 0.5);
-            label(cr, PAD_LEFT, h / 2.0, "No puzzle has been solved twice yet.", 13.0);
+            label(
+                cr,
+                PAD_LEFT,
+                h / 2.0,
+                "No puzzle has been solved twice yet.",
+                13.0,
+            );
             return;
         }
 
@@ -109,8 +115,22 @@ pub fn slope_chart(points: Vec<SlopePoint>) -> DrawingArea {
         for (index, point) in points.iter().enumerate() {
             let focused = hover.get() == Some(index);
             let dim = hover.get().is_some() && !focused;
-            let colour = if point.improved() { (0.31, 0.72, 0.47) } else { (0.85, 0.55, 0.22) };
-            set(cr, colour, if dim { 0.12 } else if focused { 1.0 } else { 0.55 });
+            let colour = if point.improved() {
+                (0.31, 0.72, 0.47)
+            } else {
+                (0.85, 0.55, 0.22)
+            };
+            set(
+                cr,
+                colour,
+                if dim {
+                    0.12
+                } else if focused {
+                    1.0
+                } else {
+                    0.55
+                },
+            );
             cr.set_line_width(if focused { 3.0 } else { 1.6 });
 
             let ya = y_of(point.first_seconds, max, h);
@@ -119,9 +139,21 @@ pub fn slope_chart(points: Vec<SlopePoint>) -> DrawingArea {
             cr.line_to(x2, yb);
             let _ = cr.stroke();
 
-            cr.arc(x1, ya, if focused { 4.0 } else { 2.5 }, 0.0, std::f64::consts::TAU);
+            cr.arc(
+                x1,
+                ya,
+                if focused { 4.0 } else { 2.5 },
+                0.0,
+                std::f64::consts::TAU,
+            );
             let _ = cr.fill();
-            cr.arc(x2, yb, if focused { 4.0 } else { 2.5 }, 0.0, std::f64::consts::TAU);
+            cr.arc(
+                x2,
+                yb,
+                if focused { 4.0 } else { 2.5 },
+                0.0,
+                std::f64::consts::TAU,
+            );
             let _ = cr.fill();
         }
 
@@ -286,7 +318,11 @@ pub fn line_chart(
         } else {
             values[values.len() - 1] <= values[0]
         };
-        let colour = if improving { (0.31, 0.72, 0.47) } else { (0.85, 0.55, 0.22) };
+        let colour = if improving {
+            (0.31, 0.72, 0.47)
+        } else {
+            (0.85, 0.55, 0.22)
+        };
 
         set(cr, colour, 0.16);
         cr.move_to(x_at(0), h - PAD_BOTTOM);
@@ -306,7 +342,13 @@ pub fn line_chart(
         let _ = cr.stroke();
 
         let last = values.len() - 1;
-        cr.arc(x_at(last), scale(values[last]), 3.5, 0.0, std::f64::consts::TAU);
+        cr.arc(
+            x_at(last),
+            scale(values[last]),
+            3.5,
+            0.0,
+            std::f64::consts::TAU,
+        );
         let _ = cr.fill();
 
         if let Some(index) = hover.get() {
@@ -317,7 +359,13 @@ pub fn line_chart(
                 cr.line_to(x_at(index), h - PAD_BOTTOM);
                 let _ = cr.stroke();
                 set(cr, fg, 0.95);
-                label(cr, PAD_LEFT, PAD_TOP, &format!("#{}  {v:.1}{unit}", index + 1), 12.0);
+                label(
+                    cr,
+                    PAD_LEFT,
+                    PAD_TOP,
+                    &format!("#{}  {v:.1}{unit}", index + 1),
+                    12.0,
+                );
             }
         }
     });

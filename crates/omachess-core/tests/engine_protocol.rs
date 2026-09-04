@@ -123,9 +123,16 @@ fn a_position_with_no_legal_moves_returns_no_move() {
     // Back-rank mate: the rook is out of the king's reach and every escape
     // square is either covered or blocked by Black's own pawns.
     let analysis = engine
-        .analyse("4R1k1/5ppp/8/8/8/8/5PPP/6K1 b - - 0 1", &[], Limit::Depth(4))
+        .analyse(
+            "4R1k1/5ppp/8/8/8/8/5PPP/6K1 b - - 0 1",
+            &[],
+            Limit::Depth(4),
+        )
         .expect("analysis should succeed");
-    assert_eq!(analysis.best_move, None, "expected no move in a mated position");
+    assert_eq!(
+        analysis.best_move, None,
+        "expected no move in a mated position"
+    );
 }
 
 /// The whole point of the play mode: a real engine reviewing a real game, and
@@ -144,8 +151,8 @@ fn a_blundered_game_becomes_training_material() {
         .map(|m| m.to_string())
         .collect();
 
-    let analysis = analyse_game(&mut engine, START_FEN, &moves, Color::Black)
-        .expect("review should succeed");
+    let analysis =
+        analyse_game(&mut engine, START_FEN, &moves, Color::Black).expect("review should succeed");
 
     let flagged = analysis.drillable();
     let blunder = flagged
@@ -179,8 +186,8 @@ fn a_reasonable_opening_produces_no_blunders() {
         .map(|m| m.to_string())
         .collect();
 
-    let analysis = analyse_game(&mut engine, START_FEN, &moves, Color::Black)
-        .expect("review should succeed");
+    let analysis =
+        analyse_game(&mut engine, START_FEN, &moves, Color::Black).expect("review should succeed");
     assert!(
         analysis.counts().blunders == 0,
         "book moves were called blunders: {:?}",

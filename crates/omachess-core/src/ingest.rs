@@ -47,7 +47,9 @@ pub fn ingest_csv_reporting<R: Read>(
     min_rating: u32,
     mut on_batch: impl FnMut(&IngestReport),
 ) -> Result<IngestReport> {
-    let mut csv = csv::ReaderBuilder::new().has_headers(true).from_reader(reader);
+    let mut csv = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(reader);
     let columns = Columns::from_headers(csv.headers().context("reading CSV header")?)?;
 
     let mut report = IngestReport::default();
@@ -177,7 +179,9 @@ impl Columns {
     }
 
     fn number(&self, record: &csv::StringRecord, name: &str) -> u32 {
-        self.get(record, name).and_then(|s| s.parse().ok()).unwrap_or(0)
+        self.get(record, name)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
     }
 
     fn words(&self, record: &csv::StringRecord, name: &str) -> Vec<String> {

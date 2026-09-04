@@ -115,9 +115,7 @@ impl BoardView {
             // A plain box rather than a button: a button installs its own
             // click gesture, which competes with the grid-level one and makes
             // press-and-drag impossible to detect reliably.
-            let cell = GtkBox::builder()
-                .orientation(Orientation::Vertical)
-                .build();
+            let cell = GtkBox::builder().orientation(Orientation::Vertical).build();
             cell.add_css_class("omachess-square");
             cell.add_css_class(if light { "light" } else { "dark" });
 
@@ -461,7 +459,9 @@ impl BoardView {
 
     fn set_cursor(&self, square: Option<Square>) {
         if let Some(previous) = self.cursor.replace(square) {
-            self.squares[previous as usize].cell.remove_css_class("cursor");
+            self.squares[previous as usize]
+                .cell
+                .remove_css_class("cursor");
         }
         if let Some(square) = square {
             self.squares[square as usize].cell.add_css_class("cursor");
@@ -490,7 +490,9 @@ impl BoardView {
     /// Mark a square as the origin of a move in progress.
     pub fn select(&self, square: Option<Square>) {
         if let Some(previous) = self.selected.replace(square) {
-            self.squares[previous as usize].cell.remove_css_class("selected");
+            self.squares[previous as usize]
+                .cell
+                .remove_css_class("selected");
         }
         if let Some(square) = square {
             self.squares[square as usize].cell.add_css_class("selected");
@@ -500,7 +502,9 @@ impl BoardView {
     /// Highlight the move just played.
     pub fn set_last_move(&self, mv: Option<(Square, Square)>) {
         if let Some((from, to)) = self.last_move.replace(mv) {
-            self.squares[from as usize].cell.remove_css_class("last-move");
+            self.squares[from as usize]
+                .cell
+                .remove_css_class("last-move");
             self.squares[to as usize].cell.remove_css_class("last-move");
         }
         if let Some((from, to)) = mv {
@@ -513,7 +517,9 @@ impl BoardView {
     /// being over is the single most important thing the board can say.
     pub fn set_mate(&self, square: Option<Square>) {
         if let Some(previous) = self.mate.replace(square) {
-            self.squares[previous as usize].cell.remove_css_class("mated");
+            self.squares[previous as usize]
+                .cell
+                .remove_css_class("mated");
         }
         if let Some(square) = square {
             self.squares[square as usize].cell.add_css_class("mated");
@@ -523,7 +529,9 @@ impl BoardView {
     /// Mark a king in check.
     pub fn set_check(&self, square: Option<Square>) {
         if let Some(previous) = self.check.replace(square) {
-            self.squares[previous as usize].cell.remove_css_class("in-check");
+            self.squares[previous as usize]
+                .cell
+                .remove_css_class("in-check");
         }
         if let Some(square) = square {
             self.squares[square as usize].cell.add_css_class("in-check");
@@ -634,8 +642,14 @@ mod tests {
 
     #[test]
     fn the_cursor_moves_right_on_screen_in_both_orientations() {
-        assert_eq!(step_cursor(Square::D4, 1, 0, Color::White), Some(Square::E4));
-        assert_eq!(step_cursor(Square::D4, 1, 0, Color::Black), Some(Square::C4));
+        assert_eq!(
+            step_cursor(Square::D4, 1, 0, Color::White),
+            Some(Square::E4)
+        );
+        assert_eq!(
+            step_cursor(Square::D4, 1, 0, Color::Black),
+            Some(Square::C4)
+        );
     }
 
     #[test]
@@ -686,7 +700,10 @@ mod tests {
 
     #[test]
     fn releasing_off_the_board_does_nothing() {
-        assert_eq!(resolve_interaction(Some(Square::E2), None), Interaction::Nothing);
+        assert_eq!(
+            resolve_interaction(Some(Square::E2), None),
+            Interaction::Nothing
+        );
         assert_eq!(resolve_interaction(None, None), Interaction::Nothing);
     }
 

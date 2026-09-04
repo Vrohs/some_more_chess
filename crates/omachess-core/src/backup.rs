@@ -178,10 +178,11 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
             mistakes: game.mistakes,
             inaccuracies: game.inaccuracies,
             source: game.source.clone(),
-            phases: game.phases.map_or(
-                [crate::store::PhaseLoss::UNKNOWN; 3],
-                |p| p.map(|(mean_loss, moves)| crate::store::PhaseLoss { mean_loss, moves }),
-            ),
+            phases: game
+                .phases
+                .map_or([crate::store::PhaseLoss::UNKNOWN; 3], |p| {
+                    p.map(|(mean_loss, moves)| crate::store::PhaseLoss { mean_loss, moves })
+                }),
         })?;
         report.games_added += 1;
     }
@@ -330,6 +331,9 @@ mod tests {
         let source = Store::in_memory().unwrap();
         let json = export(&source).unwrap();
         let mut target = Store::in_memory().unwrap();
-        assert_eq!(restore(&mut target, &json).unwrap(), RestoreReport::default());
+        assert_eq!(
+            restore(&mut target, &json).unwrap(),
+            RestoreReport::default()
+        );
     }
 }

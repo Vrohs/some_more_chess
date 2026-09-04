@@ -65,7 +65,13 @@ fn book() -> &'static HashMap<String, (String, String)> {
 
 fn longest_line() -> usize {
     static LONGEST: OnceLock<usize> = OnceLock::new();
-    *LONGEST.get_or_init(|| book().keys().map(|k| k.split(' ').count()).max().unwrap_or(0))
+    *LONGEST.get_or_init(|| {
+        book()
+            .keys()
+            .map(|k| k.split(' ').count())
+            .max()
+            .unwrap_or(0)
+    })
 }
 
 fn build_index() -> HashMap<String, (String, String)> {

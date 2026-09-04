@@ -11,7 +11,9 @@ use std::thread;
 use std::time::Duration;
 
 use omachess_core::engine::{Engine, Limit};
-use omachess_core::review::{analyse_game, confirm_drillable, AtDepth, GameAnalysis, CONFIRM_DEPTH};
+use omachess_core::review::{
+    analyse_game, confirm_drillable, AtDepth, GameAnalysis, CONFIRM_DEPTH,
+};
 use shakmaty::Color;
 
 pub enum Request {
@@ -287,7 +289,10 @@ mod tests {
         assert!(matches!(replies[0], Reply::Failed(_)));
 
         for i in 0..1000 {
-            assert!(worker.poll().is_none(), "kept talking after the report (poll {i})");
+            assert!(
+                worker.poll().is_none(),
+                "kept talking after the report (poll {i})"
+            );
         }
     }
 
@@ -299,7 +304,10 @@ mod tests {
         assert!(worker.send(request()));
         assert_eq!(drain(&worker, 200).len(), 1);
 
-        assert!(worker.send(request()), "the worker should still accept work");
+        assert!(
+            worker.send(request()),
+            "the worker should still accept work"
+        );
         let second = drain(&worker, 200);
         assert_eq!(second.len(), 1, "the retry should report too");
         assert!(matches!(second[0], Reply::Failed(_)));

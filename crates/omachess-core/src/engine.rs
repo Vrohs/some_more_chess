@@ -24,7 +24,10 @@ pub enum Limit {
     /// Depth alone is unbounded in practice: most positions reach a given depth
     /// quickly and a few take many times longer, which is enough to make an
     /// interface feel stuck.
-    DepthOrTime { depth: u32, millis: u64 },
+    DepthOrTime {
+        depth: u32,
+        millis: u64,
+    },
 }
 
 impl Limit {
@@ -82,8 +85,13 @@ impl Engine {
     /// Start an engine directly, without a sandbox. Prefer [`Engine::spawn`].
     pub fn spawn_unsandboxed(program: &Path) -> Result<Self> {
         let mut command = Command::new(program);
-        Self::start(command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()))
-            .with_context(|| format!("starting engine {}", program.display()))
+        Self::start(
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .with_context(|| format!("starting engine {}", program.display()))
     }
 
     /// Start an engine inside a `bwrap` sandbox when one is available.
@@ -117,18 +125,20 @@ impl Engine {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        Self::start(&mut command).with_context(|| {
-            format!(
-                "starting {} in a bwrap sandbox",
-                program.display()
-            )
-        })
+        Self::start(&mut command)
+            .with_context(|| format!("starting {} in a bwrap sandbox", program.display()))
     }
 
     fn start(command: &mut Command) -> Result<Self> {
         let mut child = command.spawn()?;
-        let stdin = child.stdin.take().ok_or_else(|| anyhow!("no engine stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("no engine stdout"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("no engine stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("no engine stdout"))?;
         let mut engine = Self {
             child,
             stdin,
@@ -204,7 +214,8 @@ impl Engine {
             let line = line.trim();
             if let Some(rest) = line.strip_prefix("bestmove ") {
                 let best = rest.split_whitespace().next().unwrap_or_default();
-                analysis.best_move = (best != "(none)" && !best.is_empty()).then(|| best.to_owned());
+                analysis.best_move =
+                    (best != "(none)" && !best.is_empty()).then(|| best.to_owned());
                 return Ok(analysis);
             }
             if line.starts_with("info ") {
@@ -220,7 +231,10 @@ impl Engine {
 
     fn read_line(&mut self) -> Result<String> {
         let mut line = String::new();
-        let read = self.stdout.read_line(&mut line).context("reading from engine")?;
+        let read = self
+            .stdout
+            .read_line(&mut line)
+            .context("reading from engine")?;
         if read == 0 {
             bail!(
                 "the engine produced no output and exited; if it is sandboxed, \
@@ -272,7 +286,10 @@ fn merge_info(analysis: &mut Analysis, line: &str) {
                 index += 3;
             }
             "pv" => {
-                analysis.pv = tokens[index + 1..].iter().map(|m| (*m).to_owned()).collect();
+                analysis.pv = tokens[index + 1..]
+                    .iter()
+                    .map(|m| (*m).to_owned())
+                    .collect();
                 break;
             }
             _ => index += 1,

@@ -69,7 +69,8 @@ impl ProgressView {
                  actually missed, not from a syllabus.",
             ));
             for weakness in &data.weaknesses {
-                self.root.append(&weakness_row(weakness, data.baseline_success));
+                self.root
+                    .append(&weakness_row(weakness, data.baseline_success));
             }
         }
 
@@ -106,7 +107,9 @@ impl ProgressView {
                 self.root.append(&headline(overall));
                 self.root.append(&verdict(overall));
             }
-            None => self.root.append(&empty_state(data.solved, data.repeat_mode)),
+            None => self
+                .root
+                .append(&empty_state(data.solved, data.repeat_mode)),
         }
 
         // The slope chart is the measurement itself, drawn: one line per
@@ -141,11 +144,13 @@ impl ProgressView {
                  missing easier ones lowers it. It shows the difficulty you can handle, not how \
                  fast you handle it.",
             ));
-            self.root.append(&charts::line_chart(data.ratings.clone(), "", None, true));
+            self.root
+                .append(&charts::line_chart(data.ratings.clone(), "", None, true));
         }
 
         self.root.append(&section_title("Games against the engine"));
-        self.root.append(&play_section(data.play.as_ref(), data.games.len()));
+        self.root
+            .append(&play_section(data.play.as_ref(), data.games.len()));
         if data.games.len() >= 2 {
             self.root.append(&caption(
                 "Accuracy per game, oldest first. Dashed lines mark the median of the earlier \
@@ -348,7 +353,11 @@ fn verdict(result: &Improvement) -> Label {
             )
         }
     );
-    let label = Label::builder().label(text).halign(Align::Start).wrap(true).build();
+    let label = Label::builder()
+        .label(text)
+        .halign(Align::Start)
+        .wrap(true)
+        .build();
     label.add_css_class("dim-label");
     label
 }
@@ -428,9 +437,15 @@ fn play_section(trend: Option<&PlayTrend>, games: usize) -> GtkBox {
             trend.recent_blunders_per_100,
             trend.games,
             if trend.is_significant() {
-                format!("Unlikely to be chance (Mann-Whitney p = {:.3}).", trend.p_value)
+                format!(
+                    "Unlikely to be chance (Mann-Whitney p = {:.3}).",
+                    trend.p_value
+                )
             } else {
-                format!("Not yet distinguishable from chance (p = {:.3}).", trend.p_value)
+                format!(
+                    "Not yet distinguishable from chance (p = {:.3}).",
+                    trend.p_value
+                )
             }
         ))
         .halign(Align::Start)

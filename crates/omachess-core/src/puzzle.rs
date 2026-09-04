@@ -208,12 +208,7 @@ mod tests {
     fn a_multi_move_line_plays_the_opponents_reply() {
         // 1... Kh8 2. Rb7 (threat) h6 3. Rb8#
         let puzzle = Puzzle {
-            moves: vec![
-                "g8h8".into(),
-                "b1b7".into(),
-                "h7h6".into(),
-                "b7b8".into(),
-            ],
+            moves: vec!["g8h8".into(), "b1b7".into(), "h7h6".into(), "b7b8".into()],
             ..two_mates()
         };
         let mut attempt = Attempt::new(&puzzle).unwrap();

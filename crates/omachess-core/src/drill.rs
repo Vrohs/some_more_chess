@@ -279,7 +279,11 @@ mod tests {
                 finished: false
             }
         );
-        assert_eq!(drill.expected(), Some("g7g6"), "still asking for the same move");
+        assert_eq!(
+            drill.expected(),
+            Some("g7g6"),
+            "still asking for the same move"
+        );
     }
 
     #[test]

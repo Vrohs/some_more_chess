@@ -142,9 +142,7 @@ pub fn install() {
 fn overrides() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
-        paths.push(
-            PathBuf::from(home).join(".local/state/omarchy/current/theme/omachess.css"),
-        );
+        paths.push(PathBuf::from(home).join(".local/state/omarchy/current/theme/omachess.css"));
     }
     if let Some(path) = user_stylesheet() {
         paths.push(path);

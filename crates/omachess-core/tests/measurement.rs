@@ -69,7 +69,9 @@ fn re_solving_the_same_puzzles_faster_is_measured_and_significant() {
     solve_round(&mut store, 0, 40, true);
     solve_round(&mut store, 7, 16, true);
 
-    let result = measured_improvement(&store).unwrap().expect("a measurement");
+    let result = measured_improvement(&store)
+        .unwrap()
+        .expect("a measurement");
     assert_eq!(result.puzzles, IDS.len());
     assert_eq!(result.faster, IDS.len());
     assert!(
@@ -86,7 +88,9 @@ fn re_solving_slower_is_reported_as_a_decline() {
     solve_round(&mut store, 0, 16, true);
     solve_round(&mut store, 7, 40, true);
 
-    let result = measured_improvement(&store).unwrap().expect("a measurement");
+    let result = measured_improvement(&store)
+        .unwrap()
+        .expect("a measurement");
     assert_eq!(result.slower, IDS.len());
     assert!(result.median_speedup < 1.0);
     assert!(
@@ -108,7 +112,10 @@ fn failed_repeats_do_not_count_toward_speed() {
     );
     let (rate, attempts) = store.repeat_accuracy().unwrap();
     assert_eq!(attempts, IDS.len() as u32);
-    assert!((rate - 0.0).abs() < 1e-9, "accuracy on repeat should be zero");
+    assert!(
+        (rate - 0.0).abs() < 1e-9,
+        "accuracy on repeat should be zero"
+    );
 }
 
 #[test]
@@ -382,8 +389,12 @@ fn another_players_import_is_never_counted_as_your_play() {
 
     let store = Store::in_memory().unwrap();
     store.set_setting("player_name", "vrohs").unwrap();
-    store.record_game(&game("vrohs", "https://lichess.org/mine", 0)).unwrap();
-    store.record_game(&game("dark_pssenger", "https://lichess.org/theirs", 1)).unwrap();
+    store
+        .record_game(&game("vrohs", "https://lichess.org/mine", 0))
+        .unwrap();
+    store
+        .record_game(&game("dark_pssenger", "https://lichess.org/theirs", 1))
+        .unwrap();
     // A game played in the application carries no owner and is always yours.
     store.record_game(&game("", "", 2)).unwrap();
 
@@ -448,7 +459,10 @@ fn selection_widens_rather_than_stalling_when_a_band_is_exhausted() {
     let mut store = Store::in_memory().unwrap();
     // One puzzle at the target rating, one far outside any plausible window.
     store
-        .insert_puzzles(&[puzzle("near", RATING_FLOOR), puzzle("far", RATING_FLOOR + 900)])
+        .insert_puzzles(&[
+            puzzle("near", RATING_FLOOR),
+            puzzle("far", RATING_FLOOR + 900),
+        ])
         .unwrap();
     // Solving the near one exhausts the band the target sits in.
     store.save_card("near", &rs_fsrs::Card::new()).unwrap();
@@ -461,5 +475,68 @@ fn selection_widens_rather_than_stalling_when_a_band_is_exhausted() {
 
     // With the corpus genuinely solved out it must still terminate, and say so.
     store.save_card("far", &rs_fsrs::Card::new()).unwrap();
-    assert!(store.unseen_near_rating(RATING_FLOOR, None).unwrap().is_none());
+    assert!(store
+        .unseen_near_rating(RATING_FLOOR, None)
+        .unwrap()
+        .is_none());
+}
+
+/// A handful of positions from your own games cannot compete with millions of
+/// Lichess puzzles on rating proximity alone, so the mode has to serve them by
+/// name — and must not stall once they are solved out.
+#[test]
+fn own_mistakes_mode_serves_your_own_positions_first() {
+    use omachess_core::puzzle::Puzzle;
+    use omachess_core::review::OWN_GAME_THEME;
+    use omachess_core::session::Session;
+
+    let puzzle = |id: &str, rating: u32, theme: &str| Puzzle {
+        id: id.into(),
+        fen: "6k1/5ppp/8/8/8/8/5PPP/1R4K1 b - - 0 1".into(),
+        moves: vec!["g8h8".into(), "b1b8".into()],
+        rating,
+        rating_deviation: 0,
+        popularity: 0,
+        nb_plays: 0,
+        themes: vec![theme.into()],
+        game_url: String::new(),
+        opening_tags: vec![],
+    };
+
+    let mut store = Store::in_memory().unwrap();
+    // A stranger's puzzle sits exactly on the target; yours is far away.
+    store
+        .insert_puzzles(&[
+            puzzle("lichess", RATING_FLOOR, "fork"),
+            puzzle("mine", RATING_FLOOR + 700, OWN_GAME_THEME),
+        ])
+        .unwrap();
+    store.set_personal_rating(f64::from(RATING_FLOOR)).unwrap();
+
+    assert_eq!(store.theme_stock(OWN_GAME_THEME).unwrap(), (1, 1));
+
+    let session = Session::new();
+    let now = Utc.with_ymd_and_hms(2026, 5, 1, 9, 0, 0).unwrap();
+
+    // Off, rating proximity wins.
+    store.set_own_mistakes_mode(false).unwrap();
+    assert_eq!(
+        session.next_puzzle(&store, now).unwrap().unwrap().id,
+        "lichess"
+    );
+
+    // On, your own position wins despite being 700 points away.
+    store.set_own_mistakes_mode(true).unwrap();
+    assert_eq!(
+        session.next_puzzle(&store, now).unwrap().unwrap().id,
+        "mine"
+    );
+
+    // Solved out, the trainer keeps working instead of stalling.
+    store.save_card("mine", &rs_fsrs::Card::new()).unwrap();
+    assert_eq!(store.theme_stock(OWN_GAME_THEME).unwrap(), (0, 1));
+    assert_eq!(
+        session.next_puzzle(&store, now).unwrap().unwrap().id,
+        "lichess"
+    );
 }

@@ -69,11 +69,8 @@ pub fn improvement_by_band(store: &Store) -> Result<Vec<(u32, Improvement)>> {
     Ok(bands
         .into_iter()
         .filter_map(|band| {
-            let subset: Vec<PairedSolve> = pairs
-                .iter()
-                .filter(|p| p.band == band)
-                .cloned()
-                .collect();
+            let subset: Vec<PairedSolve> =
+                pairs.iter().filter(|p| p.band == band).cloned().collect();
             summarise(&subset).map(|improvement| (band, improvement))
         })
         .collect())
@@ -129,9 +126,7 @@ pub fn sign_test(successes: usize, trials: usize) -> f64 {
 /// `ln(n choose k)`, accumulated as a product of ratios to stay in range.
 fn log_choose(n: usize, k: usize) -> f64 {
     let k = k.min(n - k);
-    (1..=k).fold(0.0, |acc, j| {
-        acc + (((n - k + j) as f64) / (j as f64)).ln()
-    })
+    (1..=k).fold(0.0, |acc, j| acc + (((n - k + j) as f64) / (j as f64)).ln())
 }
 
 fn median_f64(sorted: &[f64]) -> f64 {
@@ -180,7 +175,11 @@ mod tests {
         let pairs: Vec<_> = (0..MIN_PAIRS - 1)
             .map(|i| pair(&format!("p{i}"), 40, 10))
             .collect();
-        assert!(summarise(&pairs).is_none(), "claimed a result from {} puzzles", pairs.len());
+        assert!(
+            summarise(&pairs).is_none(),
+            "claimed a result from {} puzzles",
+            pairs.len()
+        );
     }
 
     #[test]
@@ -199,7 +198,10 @@ mod tests {
         let result = summarise(&pairs).expect("a result");
         assert_eq!(result.faster, 0);
         assert!(result.median_speedup < 1.0);
-        assert!(!result.is_significant(), "a decline must not read as significant");
+        assert!(
+            !result.is_significant(),
+            "a decline must not read as significant"
+        );
     }
 
     #[test]
@@ -237,7 +239,11 @@ mod tests {
         let result = summarise(&pairs).expect("a result");
         assert_eq!(result.unchanged, 6);
         // Six of six directional puzzles improved, so p = 0.5^6.
-        assert!((result.p_value - 0.5f64.powi(6)).abs() < 1e-9, "p was {}", result.p_value);
+        assert!(
+            (result.p_value - 0.5f64.powi(6)).abs() < 1e-9,
+            "p was {}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -255,7 +261,10 @@ mod tests {
     fn large_samples_do_not_overflow() {
         let p = sign_test(300, 500);
         assert!(p.is_finite() && (0.0..=1.0).contains(&p), "p was {p}");
-        assert!(p < 0.001, "300 of 500 should be clearly significant, got {p}");
+        assert!(
+            p < 0.001,
+            "300 of 500 should be clearly significant, got {p}"
+        );
     }
 }
 
@@ -407,7 +416,9 @@ mod game_tests {
 
     #[test]
     fn nothing_is_claimed_from_too_few_games() {
-        let games: Vec<_> = (0..MIN_GAMES as i64 - 1).map(|i| game(i, 70.0, 1)).collect();
+        let games: Vec<_> = (0..MIN_GAMES as i64 - 1)
+            .map(|i| game(i, 70.0, 1))
+            .collect();
         assert!(summarise_games(&games).is_none());
     }
 
@@ -454,7 +465,10 @@ mod game_tests {
     #[test]
     fn identical_samples_are_not_a_difference() {
         let a = vec![70.0, 72.0, 74.0, 76.0, 78.0];
-        assert!(mann_whitney_greater(&a, &a) > 0.3, "identical samples looked different");
+        assert!(
+            mann_whitney_greater(&a, &a) > 0.3,
+            "identical samples looked different"
+        );
     }
 }
 
@@ -570,7 +584,11 @@ mod series_tests {
                     reviewed_at: base + Duration::hours(i as i64 * 25),
                     elapsed: Duration::seconds(*secs),
                     correct: *correct,
-                    grade: if *correct { Rating::Good } else { Rating::Again },
+                    grade: if *correct {
+                        Rating::Good
+                    } else {
+                        Rating::Again
+                    },
                     puzzle_rating: *rating,
                 })
                 .unwrap();
@@ -630,14 +648,19 @@ mod series_tests {
         ]);
         let history = rating_history(&store).unwrap();
         assert_eq!(history.len(), 3);
-        assert!(history[0].1 > f64::from(RATING_FLOOR), "a solve should raise it");
-        assert!(history[2].1 > history[0].1, "a streak should keep raising it");
+        assert!(
+            history[0].1 > f64::from(RATING_FLOOR),
+            "a solve should raise it"
+        );
+        assert!(
+            history[2].1 > history[0].1,
+            "a streak should keep raising it"
+        );
     }
 
     #[test]
     fn the_rating_history_never_dips_below_the_floor() {
-        let losses: Vec<(&str, i64, bool, u32)> =
-            (0..20).map(|_| ("x", 5, false, 2200)).collect();
+        let losses: Vec<(&str, i64, bool, u32)> = (0..20).map(|_| ("x", 5, false, 2200)).collect();
         let store = store_with(&losses);
         for (_, rating) in rating_history(&store).unwrap() {
             assert!(rating >= f64::from(RATING_FLOOR), "dipped to {rating}");
@@ -652,7 +675,6 @@ mod series_tests {
         assert!(game_points(&store).unwrap().is_empty());
     }
 }
-
 
 /// Whether the solver has got faster on puzzles they had **never seen**.
 ///
@@ -712,8 +734,7 @@ pub fn transfer_by_band(store: &Store) -> Result<Vec<Transfer>> {
     let mut out: Vec<Transfer> = bands
         .into_iter()
         .filter_map(|band| {
-            let subset: Vec<&FirstAttempt> =
-                attempts.iter().filter(|a| a.band == band).collect();
+            let subset: Vec<&FirstAttempt> = attempts.iter().filter(|a| a.band == band).collect();
             summarise_transfer(band, &subset)
         })
         .collect();
@@ -733,10 +754,7 @@ fn summarise_transfer(band: u32, attempts: &[&FirstAttempt]) -> Option<Transfer>
     // someone who walked away.
     let times = |set: &[&FirstAttempt]| -> Vec<f64> {
         set.iter()
-            .filter(|a| {
-                a.correct
-                    && a.elapsed.num_seconds() <= crate::store::MAX_MEASURED_SECONDS
-            })
+            .filter(|a| a.correct && a.elapsed.num_seconds() <= crate::store::MAX_MEASURED_SECONDS)
             .map(|a| a.elapsed.num_milliseconds() as f64 / 1000.0)
             .collect()
     };
@@ -784,7 +802,11 @@ mod transfer_tests {
                     reviewed_at: base + Duration::hours(i as i64),
                     elapsed: Duration::seconds(*secs),
                     correct: *correct,
-                    grade: if *correct { Rating::Good } else { Rating::Again },
+                    grade: if *correct {
+                        Rating::Good
+                    } else {
+                        Rating::Again
+                    },
                     puzzle_rating: 1150,
                 })
                 .unwrap();
@@ -967,7 +989,12 @@ mod interval_tests {
         let store = Store::in_memory().unwrap();
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap();
         solve(&store, "a", base, 40);
-        solve(&store, "a", base + Duration::hours(MIN_REPEAT_HOURS as i64 + 1), 20);
+        solve(
+            &store,
+            "a",
+            base + Duration::hours(MIN_REPEAT_HOURS as i64 + 1),
+            20,
+        );
         assert_eq!(store.paired_solves().unwrap().len(), 1);
     }
 
@@ -976,9 +1003,19 @@ mod interval_tests {
         let store = Store::in_memory().unwrap();
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap();
         solve(&store, "early", base, 40);
-        solve(&store, "early", base + Duration::minutes((MIN_REPEAT_HOURS * 60.0) as i64 - 5), 20);
+        solve(
+            &store,
+            "early",
+            base + Duration::minutes((MIN_REPEAT_HOURS * 60.0) as i64 - 5),
+            20,
+        );
         solve(&store, "late", base, 40);
-        solve(&store, "late", base + Duration::minutes((MIN_REPEAT_HOURS * 60.0) as i64 + 5), 20);
+        solve(
+            &store,
+            "late",
+            base + Duration::minutes((MIN_REPEAT_HOURS * 60.0) as i64 + 5),
+            20,
+        );
 
         let ids: Vec<String> = store
             .paired_solves()
@@ -989,7 +1026,6 @@ mod interval_tests {
         assert_eq!(ids, vec!["late"], "only the one past the threshold counts");
     }
 }
-
 
 /// A theme that keeps costing the solver, with the evidence for saying so.
 ///
@@ -1061,7 +1097,11 @@ mod weakness_tests {
                     reviewed_at: base + Duration::minutes(i as i64),
                     elapsed: Duration::seconds(20),
                     correct: *correct,
-                    grade: if *correct { Rating::Good } else { Rating::Again },
+                    grade: if *correct {
+                        Rating::Good
+                    } else {
+                        Rating::Again
+                    },
                     puzzle_rating: 1150,
                 })
                 .unwrap();
@@ -1072,8 +1112,9 @@ mod weakness_tests {
     /// Forks go badly, pins go well. The comparison is between them, not
     /// against a fixed bar.
     fn mixed(fork_correct: usize, fork_total: usize) -> Store {
-        let mut attempts: Vec<(&str, bool)> =
-            (0..fork_total).map(|i| ("fork1", i < fork_correct)).collect();
+        let mut attempts: Vec<(&str, bool)> = (0..fork_total)
+            .map(|i| ("fork1", i < fork_correct))
+            .collect();
         attempts.extend((0..12).map(|_| ("pin1", true)));
         store_with(&[("fork1", "fork"), ("pin1", "pin")], &attempts)
     }
@@ -1082,7 +1123,10 @@ mod weakness_tests {
     fn a_theme_you_handle_worse_than_the_rest_is_named() {
         let store = mixed(3, 12);
         let (weak, baseline) = recurring_weaknesses(&store).unwrap();
-        assert!(baseline > 0.5, "the baseline is your own average: {baseline}");
+        assert!(
+            baseline > 0.5,
+            "the baseline is your own average: {baseline}"
+        );
         assert_eq!(weak.len(), 1, "only the fork should stand out: {weak:?}");
         assert_eq!(weak[0].theme, "fork");
         assert_eq!(weak[0].attempts, 12);
@@ -1110,7 +1154,10 @@ mod weakness_tests {
     fn a_theme_going_as_well_as_everything_else_is_not_a_weakness() {
         let store = mixed(12, 12);
         let (weak, _) = recurring_weaknesses(&store).unwrap();
-        assert!(weak.is_empty(), "solving them all is not a blind spot: {weak:?}");
+        assert!(
+            weak.is_empty(),
+            "solving them all is not a blind spot: {weak:?}"
+        );
     }
 
     #[test]

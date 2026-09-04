@@ -551,11 +551,11 @@ impl Store {
     /// than an absolute bar: the useful question is not "are you good at forks"
     /// but "are forks worse for you than everything else you do".
     pub fn overall_success(&self) -> Result<f64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COALESCE(AVG(correct), 0.0) FROM attempts", [], |r| {
-                r.get(0)
-            })?)
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(AVG(correct), 0.0) FROM attempts",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     /// Success rate per theme, for themes with at least `min_attempts` tries.
@@ -571,7 +571,11 @@ impl Store {
              ORDER BY rate ASC",
         )?;
         let rows = stmt.query_map(params![min_attempts], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, u32>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, u32>(2)?,
+            ))
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -599,15 +603,18 @@ impl Store {
                AND f.solves >= 2
                AND (julianday(l.reviewed_at) - julianday(f.reviewed_at)) * 24.0 >= ?1",
         )?;
-        let rows = stmt.query_map(params![MIN_REPEAT_HOURS, MAX_MEASURED_SECONDS * 1000], |r| {
-            Ok(PairedSolve {
-                puzzle_id: r.get(0)?,
-                band: r.get(1)?,
-                first: Duration::milliseconds(r.get(2)?),
-                latest: Duration::milliseconds(r.get(3)?),
-                solves: r.get(4)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![MIN_REPEAT_HOURS, MAX_MEASURED_SECONDS * 1000],
+            |r| {
+                Ok(PairedSolve {
+                    puzzle_id: r.get(0)?,
+                    band: r.get(1)?,
+                    first: Duration::milliseconds(r.get(2)?),
+                    latest: Duration::milliseconds(r.get(3)?),
+                    solves: r.get(4)?,
+                })
+            },
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -617,9 +624,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT reviewed_at, puzzle_rating, correct FROM attempts ORDER BY reviewed_at ASC",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0))
-        })?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -728,12 +733,10 @@ impl Store {
     /// Forget every imported game, so an export can be analysed again after
     /// the analysis itself has changed.
     pub fn forget_imported_games(&self) -> Result<usize> {
-        Ok(self
-            .conn
-            .execute(
-                "DELETE FROM games WHERE source <> '' AND player = ?1",
-                params![self.setting("player_name")?.unwrap_or_default()],
-            )?)
+        Ok(self.conn.execute(
+            "DELETE FROM games WHERE source <> '' AND player = ?1",
+            params![self.setting("player_name")?.unwrap_or_default()],
+        )?)
     }
 
     /// Whether a game from this source is already stored.
@@ -783,9 +786,18 @@ impl Store {
                 inaccuracies: r.get(9)?,
                 source: r.get(10)?,
                 phases: [
-                    PhaseLoss { mean_loss: r.get(11)?, moves: r.get(14)? },
-                    PhaseLoss { mean_loss: r.get(12)?, moves: r.get(15)? },
-                    PhaseLoss { mean_loss: r.get(13)?, moves: r.get(16)? },
+                    PhaseLoss {
+                        mean_loss: r.get(11)?,
+                        moves: r.get(14)?,
+                    },
+                    PhaseLoss {
+                        mean_loss: r.get(12)?,
+                        moves: r.get(15)?,
+                    },
+                    PhaseLoss {
+                        mean_loss: r.get(13)?,
+                        moves: r.get(16)?,
+                    },
                 ],
                 player: r.get(17)?,
             })
@@ -952,6 +964,33 @@ impl Store {
         self.set_setting("repeat_mode", if on { "on" } else { "off" })
     }
 
+    /// Whether the trainer draws only from positions taken out of your own
+    /// games. Sixty-odd of your own mistakes are invisible among millions of
+    /// Lichess puzzles unless they are asked for by name.
+    pub fn own_mistakes_mode(&self) -> Result<bool> {
+        Ok(self.setting("own_mistakes_mode")?.as_deref() == Some("on"))
+    }
+    pub fn set_own_mistakes_mode(&self, on: bool) -> Result<()> {
+        self.set_setting("own_mistakes_mode", if on { "on" } else { "off" })
+    }
+
+    /// How many puzzles carrying a theme have never been served, and how many
+    /// carry it at all. The trainer needs both to say whether a mode is worth
+    /// entering.
+    pub fn theme_stock(&self, theme: &str) -> Result<(u64, u64)> {
+        self.conn
+            .query_row(
+                "SELECT
+               COUNT(*) FILTER (
+                 WHERE NOT EXISTS (SELECT 1 FROM cards c WHERE c.puzzle_id = t.puzzle_id)
+               ),
+               COUNT(*)
+             FROM puzzle_themes t WHERE t.theme = ?1",
+                params![theme],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .map_err(Into::into)
+    }
 
     pub fn personal_rating(&self) -> Result<f64> {
         let stored: Option<String> = self

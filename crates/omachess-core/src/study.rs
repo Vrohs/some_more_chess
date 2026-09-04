@@ -170,7 +170,11 @@ mod tests {
         for _ in 0..5 {
             assert!(game.back());
         }
-        assert_eq!(game.position(), &start, "stepping back must retrace exactly");
+        assert_eq!(
+            game.position(),
+            &start,
+            "stepping back must retrace exactly"
+        );
 
         game.go_to_end();
         assert_eq!(game.position(), &end);

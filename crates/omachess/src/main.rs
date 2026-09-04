@@ -5,9 +5,9 @@ mod charts;
 mod engine_worker;
 mod pieces;
 mod play_view;
+mod progress_view;
 mod sound;
 mod study_view;
-mod progress_view;
 mod style;
 mod trainer;
 
@@ -102,14 +102,25 @@ fn command_ingest(path: Option<PathBuf>) -> anyhow::Result<()> {
         "Read {} rows: kept {}, below {RATING_FLOOR} {}, unusable {}.",
         report.read, report.kept, report.below_floor, report.malformed
     );
-    println!("{} puzzles stored at {}", store.count_puzzles()?, paths::db_path().display());
+    println!(
+        "{} puzzles stored at {}",
+        store.count_puzzles()?,
+        paths::db_path().display()
+    );
     Ok(())
 }
 
 fn command_status() -> anyhow::Result<()> {
     let store = open_store()?;
     println!("database   {}", paths::db_path().display());
-    println!("profile    {}", if paths::is_dev_profile() { "dev" } else { "default" });
+    println!(
+        "profile    {}",
+        if paths::is_dev_profile() {
+            "dev"
+        } else {
+            "default"
+        }
+    );
     println!("puzzles    {}", store.count_puzzles()?);
     println!("due now    {}", store.due_count(chrono::Utc::now())?);
     println!("rating     {:.0}", store.personal_rating()?);
@@ -131,7 +142,11 @@ fn command_progress() -> anyhow::Result<()> {
 
     println!(
         "mode       {}",
-        if store.repeat_mode()? { "repeat (measuring)" } else { "learn (not measured)" }
+        if store.repeat_mode()? {
+            "repeat (measuring)"
+        } else {
+            "learn (not measured)"
+        }
     );
     println!("solved     {} distinct puzzles", store.solved_count()?);
 
@@ -155,9 +170,7 @@ fn command_progress() -> anyhow::Result<()> {
     println!("\n-- unseen puzzles (does this mean better at chess?) --");
     let transfer = transfer_by_band(&store)?;
     if transfer.is_empty() {
-        println!(
-            "  nothing yet: {MIN_TRANSFER} first encounters are needed in one rating band"
-        );
+        println!("  nothing yet: {MIN_TRANSFER} first encounters are needed in one rating band");
     }
     for t in &transfer {
         println!(
@@ -189,7 +202,11 @@ fn command_progress() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let direction = if overall.median_speedup >= 1.0 { "faster" } else { "slower" };
+    let direction = if overall.median_speedup >= 1.0 {
+        "faster"
+    } else {
+        "slower"
+    };
     println!(
         "\n{:.0}% {direction}   {:.1}s -> {:.1}s   over {} repeated puzzles",
         (overall.median_speedup - 1.0).abs() * 100.0,
@@ -204,7 +221,10 @@ fn command_progress() -> anyhow::Result<()> {
 
     let (rate, attempts) = store.repeat_accuracy()?;
     if attempts > 0 {
-        println!("accuracy on repeats: {:.0}% of {attempts} attempts", rate * 100.0);
+        println!(
+            "accuracy on repeats: {:.0}% of {attempts} attempts",
+            rate * 100.0
+        );
     }
 
     let bands = improvement_by_band(&store)?;
@@ -217,7 +237,11 @@ fn command_progress() -> anyhow::Result<()> {
                 seconds(result.median_first),
                 seconds(result.median_latest),
                 (result.median_speedup - 1.0).abs() * 100.0,
-                if result.median_speedup >= 1.0 { "faster" } else { "slower" },
+                if result.median_speedup >= 1.0 {
+                    "faster"
+                } else {
+                    "slower"
+                },
                 result.puzzles,
                 result.p_value,
             );
@@ -236,7 +260,11 @@ fn command_games() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("{} game{} recorded\n", games.len(), if games.len() == 1 { "" } else { "s" });
+    println!(
+        "{} game{} recorded\n",
+        games.len(),
+        if games.len() == 1 { "" } else { "s" }
+    );
     for game in games.iter().rev().take(10) {
         println!(
             "  {}  {:<5} vs {:<5}  accuracy {:>5.1}%  {:.1}% lost/move  {} blunder{}",
@@ -284,8 +312,7 @@ fn command_export(path: Option<PathBuf>) -> anyhow::Result<()> {
     };
     let store = open_store()?;
     let json = omachess_core::backup::export(&store)?;
-    std::fs::write(&path, &json)
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(&path, &json).with_context(|| format!("writing {}", path.display()))?;
     println!(
         "Wrote {} KB to {}\nPuzzles can be downloaded again; this cannot. Keep it somewhere else.",
         json.len() / 1024,
@@ -298,8 +325,8 @@ fn command_restore(path: Option<PathBuf>) -> anyhow::Result<()> {
     let Some(path) = path else {
         anyhow::bail!("usage: omachess restore <file.json>");
     };
-    let json = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let json =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let mut store = open_store()?;
     let report = omachess_core::backup::restore(&mut store, &json)?;
     println!(
@@ -320,13 +347,15 @@ const IMPORT_DEPTH: u32 = 12;
 
 fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::Result<()> {
     use omachess_core::engine::{find_engine, Engine};
-    use omachess_core::review::{analyse_game, AtDepth};
+    use omachess_core::review::{
+        analyse_game, confirm_drillable, puzzle_from, stable_puzzle_id, AtDepth,
+    };
     use omachess_core::store::GameRecord;
 
     let Some(path) = path else {
         anyhow::bail!("usage: omachess import-pgn <file.pgn> [your name in the file]");
     };
-    let store = open_store()?;
+    let mut store = open_store()?;
 
     // Re-importing after the analysis itself has changed needs the old rows
     // gone, since games are otherwise skipped as already present.
@@ -369,7 +398,9 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
         return Ok(());
     }
 
+    let personal_rating = store.personal_rating()?.round().max(0.0) as u32;
     let (mut imported, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+    let mut learned = 0usize;
     for (index, (game, side)) in mine.iter().enumerate() {
         let source = game.site.clone().unwrap_or_default();
         if store.has_game_source(&source)? {
@@ -396,13 +427,30 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
             }
         };
 
+        // The mistakes in your own games are the only training material that is
+        // certainly aimed at how you actually lose. Re-check each at greater
+        // depth so a shallow verdict cannot invent one, then keep the survivors
+        // as puzzles: from here they schedule, time and measure like any other.
+        let mut analysis = analysis;
+        let _ = confirm_drillable(&mut evaluator, &mut analysis);
+        let band = game
+            .opponent_elo(*side)
+            .unwrap_or(personal_rating)
+            .max(RATING_FLOOR);
+        let own: Vec<_> = analysis
+            .drillable()
+            .iter()
+            .map(|review| puzzle_from(review, band, &stable_puzzle_id(review)))
+            .collect();
+        learned += own.len();
+        store.insert_puzzles(&own)?;
+
         let counts = analysis.counts();
         store.record_game(&GameRecord {
             player: player.clone(),
-            played_at: parse_date(game.date.as_deref())
-                .unwrap_or_else(chrono::Utc::now),
+            played_at: parse_date(game.date.as_deref()).unwrap_or_else(chrono::Utc::now),
             player_white: *side == shakmaty::Color::White,
-            opponent_elo: 0,
+            opponent_elo: game.opponent_elo(*side).unwrap_or(0),
             result: game.outcome_for(*side).to_owned(),
             moves: analysis.moves.len() as u32,
             accuracy: analysis.accuracy(),
@@ -429,9 +477,8 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
         })?;
         imported += 1;
     }
-    println!(
-        "\rimported {imported}, already present {skipped}, unreadable {failed}          "
-    );
+    println!("\rimported {imported}, already present {skipped}, unreadable {failed}          ");
+    println!("{learned} positions from your own mistakes are now in the trainer.");
     println!("Run `omachess games` to see the trend.");
     Ok(())
 }
@@ -444,7 +491,9 @@ fn parse_date(date: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
     let year: i32 = parts.next()?.parse().ok()?;
     let month: u32 = parts.next()?.parse().ok()?;
     let day: u32 = parts.next()?.parse().ok()?;
-    chrono::Utc.with_ymd_and_hms(year, month, day, 12, 0, 0).single()
+    chrono::Utc
+        .with_ymd_and_hms(year, month, day, 12, 0, 0)
+        .single()
 }
 
 fn run_app(study: Option<PathBuf>) -> anyhow::Result<()> {

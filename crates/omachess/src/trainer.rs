@@ -46,6 +46,7 @@ pub struct Trainer {
     board: Rc<BoardView>,
     sounds: Rc<Sounds>,
     mode_switch: Switch,
+    own_switch: Switch,
     mode_caption: Label,
     start: Button,
     /// Whether the solver has begun this session. Only the first puzzle waits
@@ -89,6 +90,11 @@ impl Trainer {
         // the app decides quietly: one builds a repertoire, the other measures.
         let mode_switch = Switch::builder().valign(Align::Center).build();
         let mode_label = Label::builder().label("Repeat & measure").build();
+
+        // The positions you actually lost from are the material a coach would
+        // pick, and there are only ever a few dozen, so they need asking for.
+        let own_switch = Switch::builder().valign(Align::Center).build();
+        let own_label = Label::builder().label("My mistakes").build();
         let mode_caption = Label::builder()
             .halign(Align::Start)
             .wrap(true)
@@ -107,6 +113,8 @@ impl Trainer {
             .spacing(8)
             .build();
         mode_row.append(&start);
+        mode_row.append(&own_label);
+        mode_row.append(&own_switch);
         mode_row.append(&mode_label);
         mode_row.append(&mode_switch);
         let spacer = GtkBox::builder().hexpand(true).build();
@@ -148,6 +156,7 @@ impl Trainer {
             board,
             sounds,
             mode_switch,
+            own_switch,
             mode_caption,
             start,
             session_started: Cell::new(false),
@@ -166,12 +175,22 @@ impl Trainer {
         });
 
         trainer.mode_switch.set_active(trainer.repeat_mode());
+        trainer.own_switch.set_active(trainer.own_mistakes_mode());
         trainer.describe_mode();
 
         let weak: Weak<Self> = Rc::downgrade(&trainer);
         trainer.mode_switch.connect_state_set(move |_, on| {
             if let Some(trainer) = weak.upgrade() {
                 trainer.set_repeat_mode(on);
+                trainer.describe_mode();
+            }
+            glib::Propagation::Proceed
+        });
+
+        let weak: Weak<Self> = Rc::downgrade(&trainer);
+        trainer.own_switch.connect_state_set(move |_, on| {
+            if let Some(trainer) = weak.upgrade() {
+                trainer.set_own_mistakes_mode(on);
                 trainer.describe_mode();
             }
             glib::Propagation::Proceed
@@ -217,7 +236,10 @@ impl Trainer {
         if total == 0 {
             return "No puzzles loaded — run `omachess ingest <lichess_db_puzzle.csv.zst>`".into();
         }
-        format!("Rating {rating:.0} · {due} due · {} puzzles", compact(total))
+        format!(
+            "Rating {rating:.0} · {due} due · {} puzzles",
+            compact(total)
+        )
     }
 
     /// Everything the progress view draws, gathered in one pass so the figures
@@ -225,8 +247,7 @@ impl Trainer {
     pub fn progress_data(&self) -> ProgressData {
         use omachess_core::progress as p;
         let store = self.store.borrow();
-        let (weaknesses, baseline_success) =
-            p::recurring_weaknesses(&store).unwrap_or_default();
+        let (weaknesses, baseline_success) = p::recurring_weaknesses(&store).unwrap_or_default();
         ProgressData {
             weaknesses,
             baseline_success,
@@ -251,6 +272,15 @@ impl Trainer {
         self.store.borrow().repeat_mode().unwrap_or(false)
     }
 
+    pub fn own_mistakes_mode(&self) -> bool {
+        self.store.borrow().own_mistakes_mode().unwrap_or(false)
+    }
+
+    /// Draw only from positions taken out of the player's own games.
+    pub fn set_own_mistakes_mode(&self, on: bool) {
+        let _ = self.store.borrow().set_own_mistakes_mode(on);
+    }
+
     /// Switch between learning new material and re-testing solved material.
     pub fn set_repeat_mode(&self, on: bool) {
         let _ = self.store.borrow().set_repeat_mode(on);
@@ -261,6 +291,24 @@ impl Trainer {
     /// never a hidden detail.
     fn describe_mode(&self) {
         let solved = self.solved_count();
+        if self.own_mistakes_mode() && !self.repeat_mode() {
+            let (unseen, total) = self
+                .store
+                .borrow()
+                .theme_stock(omachess_core::review::OWN_GAME_THEME)
+                .unwrap_or((0, 0));
+            self.mode_caption.set_label(&if total == 0 {
+                "No positions from your own games yet — import a PGN export first.".to_owned()
+            } else if unseen == 0 {
+                format!(
+                    "All {total} positions from your own games are solved. \
+                     Turn on Repeat & measure to re-test them."
+                )
+            } else {
+                format!("{unseen} of {total} positions from your own losses still to face.")
+            });
+            return;
+        }
         self.mode_caption.set_label(&if self.repeat_mode() {
             format!(
                 "Re-testing {solved} solved puzzle{} — these attempts are measured.",
@@ -296,8 +344,11 @@ impl Trainer {
                         shakmaty::Color::White => "White",
                         shakmaty::Color::Black => "Black",
                     };
-                    self.detail
-                        .set_label(&format!("Rating {} · {}", puzzle.rating, puzzle.themes.join(", ")));
+                    self.detail.set_label(&format!(
+                        "Rating {} · {}",
+                        puzzle.rating,
+                        puzzle.themes.join(", ")
+                    ));
 
                     // The puzzle must be in place before anything reveals it;
                     // revealing first reads an empty slot and shows nothing.
@@ -336,7 +387,12 @@ impl Trainer {
     /// Begin the session. Only the first puzzle needs this.
     fn begin_solving(&self) {
         self.session_started.set(true);
-        let side = match self.current.borrow().as_ref().map(|c| c.attempt.position().turn()) {
+        let side = match self
+            .current
+            .borrow()
+            .as_ref()
+            .map(|c| c.attempt.position().turn())
+        {
             Some(shakmaty::Color::White) => "White",
             Some(shakmaty::Color::Black) => "Black",
             None => return,
@@ -481,7 +537,8 @@ impl Trainer {
             Ok(MoveOutcome::Continued(reply)) => {
                 if let Some(current) = self.current.borrow().as_ref() {
                     self.board.set_position(current.attempt.position());
-                    self.board.set_check(check_square(current.attempt.position()));
+                    self.board
+                        .set_check(check_square(current.attempt.position()));
                 }
                 // Highlight the opponent's reply rather than our own move: that
                 // is the change the solver has to read before answering.
@@ -493,9 +550,11 @@ impl Trainer {
             Ok(MoveOutcome::Solved) => {
                 if let Some(current) = self.current.borrow().as_ref() {
                     self.board.set_position(current.attempt.position());
-                    self.board.set_check(check_square(current.attempt.position()));
+                    self.board
+                        .set_check(check_square(current.attempt.position()));
                 }
-                self.board.set_last_move(mv.from().map(|from| (from, mv.to())));
+                self.board
+                    .set_last_move(mv.from().map(|from| (from, mv.to())));
                 self.sounds.play(Cue::Solved);
                 self.finish();
             }
@@ -572,7 +631,9 @@ impl Trainer {
                     band(current.puzzle.rating),
                 ));
             }
-            Err(e) => self.status.set_label(&format!("Could not record attempt: {e}")),
+            Err(e) => self
+                .status
+                .set_label(&format!("Could not record attempt: {e}")),
         }
 
         let weak: Weak<Self> = Rc::downgrade(self);

@@ -22,6 +22,10 @@ pub struct ImportedGame {
     pub site: Option<String>,
     /// Moves in UCI, which is what the engine speaks.
     pub moves: Vec<String>,
+    /// Player ratings, where the file gives them. Without these the strength
+    /// of the opposition is unknown and every game looks equally hard.
+    pub white_elo: Option<u32>,
+    pub black_elo: Option<u32>,
 }
 
 impl ImportedGame {
@@ -35,6 +39,14 @@ impl ImportedGame {
             Some(Color::Black)
         } else {
             None
+        }
+    }
+
+    /// How strong the opposition was, from that player's point of view.
+    pub fn opponent_elo(&self, side: Color) -> Option<u32> {
+        match side {
+            Color::White => self.black_elo,
+            Color::Black => self.white_elo,
         }
     }
 
@@ -77,6 +89,8 @@ struct Collector {
     result: String,
     date: Option<String>,
     site: Option<String>,
+    white_elo: Option<u32>,
+    black_elo: Option<u32>,
     position: Chess,
     moves: Vec<String>,
     broken: bool,
@@ -112,6 +126,8 @@ impl Visitor for Collector {
             b"Result" => self.result = text,
             b"UTCDate" | b"Date" => self.date = Some(text),
             b"Site" | b"Link" => self.site = Some(text),
+            b"WhiteElo" => self.white_elo = text.trim().parse().ok(),
+            b"BlackElo" => self.black_elo = text.trim().parse().ok(),
             _ => {}
         }
         std::ops::ControlFlow::Continue(())
@@ -162,6 +178,8 @@ impl Visitor for Collector {
             date: self.date.take(),
             site: self.site.take(),
             moves: std::mem::take(&mut self.moves),
+            white_elo: self.white_elo.take(),
+            black_elo: self.black_elo.take(),
         })
     }
 }
@@ -194,7 +212,10 @@ mod tests {
         let games = read_all(SAMPLE.as_bytes()).unwrap();
         assert_eq!(games.len(), 2);
         assert_eq!(games[0].white, "Vrohs");
-        assert_eq!(games[0].site.as_deref(), Some("https://lichess.org/abcd1234"));
+        assert_eq!(
+            games[0].site.as_deref(),
+            Some("https://lichess.org/abcd1234")
+        );
         assert_eq!(
             games[0].moves,
             ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6"]

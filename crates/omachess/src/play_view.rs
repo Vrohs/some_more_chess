@@ -16,12 +16,12 @@ use gtk4::{
     glib, Align, AspectFrame, Box as GtkBox, Button, DropDown, Label, ListBox, Orientation,
     PolicyType, ScrolledWindow, SelectionMode,
 };
-use omachess_core::engine::MIN_LIMITED_ELO;
-use omachess_core::game::{EndReason, Game, Verdict};
-use omachess_core::puzzle::Puzzle;
 use omachess_core::drill::{Drill, Offer};
+use omachess_core::engine::MIN_LIMITED_ELO;
 use omachess_core::game::{material_balance, whose_turn, Turn};
+use omachess_core::game::{EndReason, Game, Verdict};
 use omachess_core::openings;
+use omachess_core::puzzle::Puzzle;
 use omachess_core::review::{
     puzzle_from, stable_puzzle_id, time_pressure, GameAnalysis, MoveAnalysis,
 };
@@ -339,7 +339,9 @@ impl PlayView {
             .borrow()
             .play_rating()
             .unwrap_or(f64::from(MIN_LIMITED_ELO));
-        ((rating + omachess_core::game::OPPONENT_MARGIN).round().max(0.0) as u32)
+        ((rating + omachess_core::game::OPPONENT_MARGIN)
+            .round()
+            .max(0.0) as u32)
             .max(MIN_LIMITED_ELO)
     }
 
@@ -371,7 +373,10 @@ impl PlayView {
         clear_list(&self.review_list);
         self.update_material();
         self.status.set_label("Your move.");
-        self.detail.set_label(&format!("Opponent capped near {} Elo.", self.opponent_elo()));
+        self.detail.set_label(&format!(
+            "Opponent capped near {} Elo.",
+            self.opponent_elo()
+        ));
         self.request_engine_if_due();
     }
 
@@ -429,7 +434,9 @@ impl PlayView {
             return;
         }
         if !self.player_may_move() || !self.has_own_piece(from) {
-            trace(&format!("no move offered from {from:?}: not your turn or not your piece"));
+            trace(&format!(
+                "no move offered from {from:?}: not your turn or not your piece"
+            ));
             return;
         }
         if self.find_move(from, to).is_none() {
@@ -517,16 +524,16 @@ impl PlayView {
             return;
         };
         self.board.set_position(game.position());
-        self.board.set_last_move(
-            last.and_then(|(from, to)| from.map(|from| (from, to))),
-        );
+        self.board
+            .set_last_move(last.and_then(|(from, to)| from.map(|from| (from, to))));
         self.board.set_check(
             game.position()
                 .is_check()
                 .then(|| game.position().board().king_of(game.position().turn()))
                 .flatten(),
         );
-        self.moves.set_label(&format_moves(game, &self.move_times.borrow()));
+        self.moves
+            .set_label(&format_moves(game, &self.move_times.borrow()));
         drop(guard);
         self.update_material();
         self.update_opening();
@@ -590,7 +597,12 @@ impl PlayView {
             self.finish_game();
             return;
         }
-        if self.game.borrow().as_ref().is_some_and(Game::is_player_turn) {
+        if self
+            .game
+            .borrow()
+            .as_ref()
+            .is_some_and(Game::is_player_turn)
+        {
             self.status.set_label("Your move.");
             return;
         }
@@ -743,7 +755,7 @@ impl PlayView {
     }
 
     /// Put the player back in the position where the game turned.
-     /// Put the player back in the position where the game turned.
+    /// Put the player back in the position where the game turned.
     fn start_drill(self: &Rc<Self>) {
         let Some((drill, ply, lost)) = ({
             let report = self.report.borrow();
@@ -775,8 +787,8 @@ impl PlayView {
     }
 
     /// Judge a move offered during the drill.
-     /// Judge a move offered during the exercise.
-     /// Judge a move offered during the exercise and walk the line forward.
+    /// Judge a move offered during the exercise.
+    /// Judge a move offered during the exercise and walk the line forward.
     fn drill_move(self: &Rc<Self>, from: Square, to: Square) {
         let outcome = match self.drill.borrow_mut().as_mut() {
             Some(drill) => drill.offer(from, to),
@@ -796,9 +808,7 @@ impl PlayView {
                 });
                 self.describe_drill(finished, None);
             }
-            Offer::Wrong {
-                revealed: None, ..
-            } => {
+            Offer::Wrong { revealed: None, .. } => {
                 self.sounds.play(Cue::Wrong);
                 self.board.set_wrong(true);
                 let board = self.board.clone();
@@ -869,8 +879,8 @@ impl PlayView {
     }
 
     /// Play the engine's line so the player sees what the move was for.
-     /// Play out the line so the player sees what the move was for.
-     /// Store how well the game was played, so quality can be tracked over time
+    /// Play out the line so the player sees what the move was for.
+    /// Store how well the game was played, so quality can be tracked over time
     /// independently of how many were won.
     fn record_game(&self, analysis: &GameAnalysis) {
         if analysis.is_empty() {
@@ -944,10 +954,7 @@ impl PlayView {
                 .label(format!(
                     "Move {} — {}",
                     review.ply / 2 + 1,
-                    review
-                        .severity
-                        .map(|s| s.label())
-                        .unwrap_or("inaccuracy")
+                    review.severity.map(|s| s.label()).unwrap_or("inaccuracy")
                 ))
                 .halign(Align::Start)
                 .build();

@@ -14,8 +14,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gtk4::gdk;
-use gtk4::prelude::*;
 use gtk4::glib::Bytes;
+use gtk4::prelude::*;
 use shakmaty::{Color, Role};
 
 /// Edge length the pieces are rasterised at. Squares are smaller than this in
@@ -110,8 +110,7 @@ impl PieceSet {
 
 fn rasterise(path: &Path, woodify: bool) -> Option<gdk::Texture> {
     let data = fs::read(path).ok()?;
-    let tree =
-        resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default()).ok()?;
+    let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default()).ok()?;
 
     let size = tree.size();
     if size.width() <= 0.0 || size.height() <= 0.0 {
@@ -123,8 +122,8 @@ fn rasterise(path: &Path, woodify: bool) -> Option<gdk::Texture> {
     let offset_y = (RENDER_PX as f32 - size.height() * scale) / 2.0;
 
     let mut pixmap = resvg::tiny_skia::Pixmap::new(RENDER_PX, RENDER_PX)?;
-    let transform = resvg::tiny_skia::Transform::from_translate(offset_x, offset_y)
-        .pre_scale(scale, scale);
+    let transform =
+        resvg::tiny_skia::Transform::from_translate(offset_x, offset_y).pre_scale(scale, scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
     if woodify {

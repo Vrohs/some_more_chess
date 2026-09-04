@@ -277,9 +277,7 @@ impl Game {
         self.san
             .chunks(2)
             .enumerate()
-            .map(|(index, pair)| {
-                (index + 1, pair[0].clone(), pair.get(1).cloned())
-            })
+            .map(|(index, pair)| (index + 1, pair[0].clone(), pair.get(1).cloned()))
             .collect()
     }
 }
@@ -385,7 +383,10 @@ mod tests {
             play(&mut game, uci);
         }
         assert_eq!(game.end_reason(), Some(EndReason::Checkmate));
-        assert!(game.mated_king().is_some(), "the mated king must be locatable");
+        assert!(
+            game.mated_king().is_some(),
+            "the mated king must be locatable"
+        );
     }
 
     #[test]
@@ -504,25 +505,22 @@ mod tests {
     #[test]
     fn castling_is_also_found_by_dragging_king_onto_rook() {
         let pos = position("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
-        assert!(find_move(&pos, Square::E1, Square::H1, None)
-            .is_some_and(|mv| mv.is_castle()));
+        assert!(find_move(&pos, Square::E1, Square::H1, None).is_some_and(|mv| mv.is_castle()));
     }
 
     #[test]
     fn black_castles_to_its_own_squares() {
         let pos = position("r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1");
-        assert!(find_move(&pos, Square::E8, Square::G8, None)
-            .is_some_and(|mv| mv.is_castle()));
-        assert!(find_move(&pos, Square::E8, Square::C8, None)
-            .is_some_and(|mv| mv.is_castle()));
+        assert!(find_move(&pos, Square::E8, Square::G8, None).is_some_and(|mv| mv.is_castle()));
+        assert!(find_move(&pos, Square::E8, Square::C8, None).is_some_and(|mv| mv.is_castle()));
     }
 
     #[test]
     fn en_passant_is_found_and_recognised_as_a_capture() {
         // White pawn on e5, Black has just played d7-d5.
         let pos = position("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2");
-        let mv = find_move(&pos, Square::E5, Square::D6, None)
-            .expect("en passant must be reachable");
+        let mv =
+            find_move(&pos, Square::E5, Square::D6, None).expect("en passant must be reachable");
         assert!(mv.is_en_passant());
         assert!(mv.is_capture(), "en passant is a capture");
     }
