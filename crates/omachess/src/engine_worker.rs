@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 
 use omachess_core::engine::{Engine, Limit};
-use omachess_core::review::{analyse_game, GameAnalysis};
+use omachess_core::review::{analyse_game, confirm_drillable, AtDepth, GameAnalysis, CONFIRM_DEPTH};
 use shakmaty::Color;
 
 pub enum Request {
@@ -128,7 +128,16 @@ impl EngineWorker {
                             }
                         }
                         match analyse_game(active, &fen, &moves, player) {
-                            Ok(analysis) => Reply::Review(analysis),
+                            Ok(mut analysis) => {
+                                // Anything that will be offered as a puzzle is
+                                // re-checked deeper before it can be.
+                                let mut deeper = AtDepth {
+                                    engine: active,
+                                    depth: CONFIRM_DEPTH,
+                                };
+                                let _ = confirm_drillable(&mut deeper, &mut analysis);
+                                Reply::Review(analysis)
+                            }
                             Err(e) => {
                                 engine = None;
                                 Reply::Failed(format!("{e:#}"))

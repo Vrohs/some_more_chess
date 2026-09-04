@@ -9,12 +9,39 @@ use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Fixed, GestureDrag, Grid, Label, Orientation, Overlay, Picture};
+use gtk4::{
+    gdk, Align, Box as GtkBox, EventControllerKey, Fixed, GestureDrag, Grid, Label, Orientation,
+    Overlay, Picture,
+};
 use shakmaty::{Chess, Color, Position, Role, Square};
 
 use crate::pieces::PieceSet;
 
 type SquareHandler = Box<dyn Fn(Square)>;
+
+/// What a press-and-release on the board meant.
+///
+/// A single gesture serves both interaction styles, so the decision between
+/// them is worth stating once, in a form that can be checked, rather than
+/// living inside an event closure where it cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interaction {
+    /// Pressed and released on the same square, or pressed off the board.
+    Click(Square),
+    /// Pressed on one square and released on another.
+    Drag { from: Square, to: Square },
+    /// Nothing usable happened — released off the board, for instance.
+    Nothing,
+}
+
+/// Decide what a press at one square and a release at another meant.
+pub fn resolve_interaction(press: Option<Square>, release: Option<Square>) -> Interaction {
+    match (press, release) {
+        (Some(from), Some(to)) if from != to => Interaction::Drag { from, to },
+        (_, Some(to)) => Interaction::Click(to),
+        _ => Interaction::Nothing,
+    }
+}
 type DragHandler = Box<dyn Fn(Square, Square)>;
 
 /// However a piece is drawn, it is held directly rather than found by walking
@@ -58,6 +85,8 @@ pub struct BoardView {
     orientation: RefCell<Color>,
     /// Square the pointer went down on, used to tell a drag from a click.
     press_origin: Cell<Option<Square>>,
+    /// The keyboard cursor, so the board can be played without a mouse.
+    cursor: Cell<Option<Square>>,
     /// Where the press began, in grid coordinates.
     press_point: Cell<(f64, f64)>,
     /// Edge length of the carried piece, in pixels.
@@ -73,6 +102,8 @@ impl BoardView {
             .column_homogeneous(true)
             .hexpand(true)
             .vexpand(true)
+            // Focusable so the board can be played from the keyboard alone.
+            .focusable(true)
             .build();
         grid.add_css_class("omachess-board");
 
@@ -177,6 +208,7 @@ impl BoardView {
             mate: RefCell::new(None),
             orientation: RefCell::new(Color::White),
             press_origin: Cell::new(None),
+            cursor: Cell::new(None),
             press_point: Cell::new((0.0, 0.0)),
             ghost_size: Cell::new(0),
             pieces,
@@ -212,13 +244,43 @@ impl BoardView {
 
             let (sx, sy) = view.press_point.get();
             let to = view.square_at_point(sx + dx, sy + dy);
-            match (from, to) {
-                (Some(from), Some(to)) if from != to => view.on_drag(from, to),
-                (_, Some(to)) => view.on_click(to),
-                _ => {}
+            match resolve_interaction(from, to) {
+                Interaction::Drag { from, to } => view.on_drag(from, to),
+                Interaction::Click(square) => view.on_click(square),
+                Interaction::Nothing => {}
             }
         });
         view.grid.add_controller(drag);
+
+        // Arrow keys walk a cursor, Enter or Space acts on it — the same two
+        // steps a click makes, for anyone not using a mouse.
+        let keys = EventControllerKey::new();
+        let weak: Weak<Self> = Rc::downgrade(&view);
+        keys.connect_key_pressed(move |_, key, _, _| {
+            let Some(view) = weak.upgrade() else {
+                return gtk4::glib::Propagation::Proceed;
+            };
+            let step = match key {
+                gdk::Key::Left => (-1, 0),
+                gdk::Key::Right => (1, 0),
+                gdk::Key::Up => (0, -1),
+                gdk::Key::Down => (0, 1),
+                gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space => {
+                    if let Some(square) = view.cursor.get() {
+                        view.on_click(square);
+                    }
+                    return gtk4::glib::Propagation::Stop;
+                }
+                gdk::Key::Escape => {
+                    view.select(None);
+                    return gtk4::glib::Propagation::Stop;
+                }
+                _ => return gtk4::glib::Propagation::Proceed,
+            };
+            view.move_cursor(step.0, step.1);
+            gtk4::glib::Propagation::Stop
+        });
+        view.grid.add_controller(keys);
 
         view
     }
@@ -386,6 +448,26 @@ impl BoardView {
         }
     }
 
+    /// Move the keyboard cursor, starting from the middle if it has none yet.
+    fn move_cursor(&self, dx: i32, dy: i32) {
+        let orientation = *self.orientation.borrow();
+        let next = match self.cursor.get() {
+            Some(square) => step_cursor(square, dx, dy, orientation).unwrap_or(square),
+            // The first key press lands somewhere central rather than a corner.
+            None => square_at(4, 4, orientation).unwrap_or(Square::E4),
+        };
+        self.set_cursor(Some(next));
+    }
+
+    fn set_cursor(&self, square: Option<Square>) {
+        if let Some(previous) = self.cursor.replace(square) {
+            self.squares[previous as usize].cell.remove_css_class("cursor");
+        }
+        if let Some(square) = square {
+            self.squares[square as usize].cell.add_css_class("cursor");
+        }
+    }
+
     /// Empty every square. Used to withhold a puzzle until the solver is ready,
     /// so the clock and the position start together.
     pub fn clear(&self) {
@@ -475,6 +557,32 @@ fn coordinate_label(text: &str, halign: Align, valign: Align, on_light: bool) ->
     label
 }
 
+/// The square shown at a grid cell, or `None` off the board. The inverse of
+/// [`grid_position`], used to walk the keyboard cursor in the direction the
+/// player sees rather than the direction the ranks run.
+pub fn square_at(column: i32, row: i32, orientation: Color) -> Option<Square> {
+    if !(0..8).contains(&column) || !(0..8).contains(&row) {
+        return None;
+    }
+    let (file, rank) = match orientation {
+        Color::White => (column, 7 - row),
+        Color::Black => (7 - column, row),
+    };
+    Some(Square::from_coords(
+        shakmaty::File::new(file as u32),
+        shakmaty::Rank::new(rank as u32),
+    ))
+}
+
+/// Step the keyboard cursor one square in a screen direction.
+///
+/// `dx` and `dy` are in screen terms — right and down — so the same key does
+/// the same visible thing whichever way the board is facing.
+pub fn step_cursor(from: Square, dx: i32, dy: i32, orientation: Color) -> Option<Square> {
+    let (column, row) = grid_position(from, orientation);
+    square_at(column + dx, row + dy, orientation)
+}
+
 /// Where a square sits in the grid for a given orientation.
 fn grid_position(square: Square, orientation: Color) -> (i32, i32) {
     let file = i32::from(square.file().char() as u8 - b'a');
@@ -509,6 +617,78 @@ fn glyph(role: Role) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cursor_moves_the_way_the_board_is_facing() {
+        // With White at the bottom, "up" goes toward rank 8.
+        assert_eq!(
+            step_cursor(Square::E4, 0, -1, Color::White),
+            Some(Square::E5)
+        );
+        // Flipped, the same key still moves up the screen, which is rank 3.
+        assert_eq!(
+            step_cursor(Square::E4, 0, -1, Color::Black),
+            Some(Square::E3)
+        );
+    }
+
+    #[test]
+    fn the_cursor_moves_right_on_screen_in_both_orientations() {
+        assert_eq!(step_cursor(Square::D4, 1, 0, Color::White), Some(Square::E4));
+        assert_eq!(step_cursor(Square::D4, 1, 0, Color::Black), Some(Square::C4));
+    }
+
+    #[test]
+    fn the_cursor_stops_at_the_edge_rather_than_wrapping() {
+        assert_eq!(step_cursor(Square::A1, -1, 0, Color::White), None);
+        assert_eq!(step_cursor(Square::H8, 0, -1, Color::White), None);
+        assert_eq!(step_cursor(Square::A1, 1, 0, Color::Black), None);
+    }
+
+    #[test]
+    fn square_at_is_the_exact_inverse_of_grid_position() {
+        for orientation in [Color::White, Color::Black] {
+            for index in 0..64u32 {
+                let square = Square::new(index);
+                let (column, row) = grid_position(square, orientation);
+                assert_eq!(square_at(column, row, orientation), Some(square));
+            }
+        }
+    }
+
+    #[test]
+    fn releasing_on_a_different_square_is_a_drag() {
+        assert_eq!(
+            resolve_interaction(Some(Square::E1), Some(Square::G1)),
+            Interaction::Drag {
+                from: Square::E1,
+                to: Square::G1
+            },
+            "dragging the king two squares is how castling is played"
+        );
+    }
+
+    #[test]
+    fn releasing_where_you_pressed_is_a_click() {
+        assert_eq!(
+            resolve_interaction(Some(Square::E2), Some(Square::E2)),
+            Interaction::Click(Square::E2)
+        );
+    }
+
+    #[test]
+    fn a_press_that_began_off_the_board_still_selects_where_it_ended() {
+        assert_eq!(
+            resolve_interaction(None, Some(Square::D4)),
+            Interaction::Click(Square::D4)
+        );
+    }
+
+    #[test]
+    fn releasing_off_the_board_does_nothing() {
+        assert_eq!(resolve_interaction(Some(Square::E2), None), Interaction::Nothing);
+        assert_eq!(resolve_interaction(None, None), Interaction::Nothing);
+    }
 
     #[test]
     fn a1_is_dark_and_h1_is_light() {

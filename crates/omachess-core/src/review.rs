@@ -348,6 +348,50 @@ pub fn analyse_game(
     Ok(analysis)
 }
 
+/// Depth the answer is re-checked at before it is allowed to become a puzzle.
+/// Deeper than the review pass, because a puzzle asserts its answer as correct
+/// and a wrong puzzle teaches a wrong pattern.
+pub const CONFIRM_DEPTH: u32 = 20;
+
+/// Re-examine each move worth drilling and drop the ones a deeper search
+/// disagrees with.
+///
+/// The review pass is a compromise between accuracy and time across a whole
+/// game. That is fine for a report — a mistaken severity costs a line of text.
+/// It is not fine for a puzzle, which presents its answer as the truth, so
+/// every candidate is confirmed before it can become one.
+///
+/// Returns how many were rejected.
+pub fn confirm_drillable(
+    evaluator: &mut impl Evaluator,
+    analysis: &mut GameAnalysis,
+) -> Result<usize> {
+    let mut rejected = 0;
+    for review in &mut analysis.moves {
+        if !review.is_drillable() {
+            continue;
+        }
+        let deeper = evaluator.eval(
+            &review.setup_fen,
+            std::slice::from_ref(&review.setup_move),
+        )?;
+        let confirmed = deeper
+            .best_move
+            .as_deref()
+            .is_some_and(|best| best == review.best);
+        if !confirmed {
+            // Not certain enough to teach, so it stays in the report as a
+            // note and stops being an exercise.
+            review.severity = None;
+            rejected += 1;
+        } else if !deeper.pv.is_empty() {
+            // Keep the better line while it is in hand.
+            review.best_line = deeper.pv.clone();
+        }
+    }
+    Ok(rejected)
+}
+
 /// Build a puzzle from a reviewed mistake.
 ///
 /// The shape matches the Lichess export exactly — a position, the opponent move
@@ -504,6 +548,89 @@ mod tests {
         let mut c = a.clone();
         c.ply = 40;
         assert_eq!(stable_puzzle_id(&a), stable_puzzle_id(&c));
+    }
+
+    /// Answers whatever it is told to, so confirmation can be exercised without
+    /// an engine.
+    struct FixedEvaluator {
+        best: &'static str,
+        pv: Vec<String>,
+    }
+
+    impl Evaluator for FixedEvaluator {
+        fn eval(&mut self, _fen: &str, _moves: &[String]) -> Result<Analysis> {
+            Ok(Analysis {
+                best_move: Some(self.best.to_owned()),
+                score: Some(Score::Cp(0)),
+                depth: CONFIRM_DEPTH,
+                pv: self.pv.clone(),
+            })
+        }
+    }
+
+    fn drillable_move() -> MoveAnalysis {
+        MoveAnalysis {
+            ply: 3,
+            setup_fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".into(),
+            setup_move: "e2e4".into(),
+            played: "b8c6".into(),
+            best: "e7e5".into(),
+            best_line: vec!["e7e5".into()],
+            phase: Phase::Opening,
+            win_before: 0.5,
+            win_after: 0.2,
+            severity: Some(Severity::Mistake),
+        }
+    }
+
+    #[test]
+    fn an_answer_a_deeper_search_agrees_with_survives() {
+        let mut analysis = GameAnalysis {
+            moves: vec![drillable_move()],
+        };
+        let mut evaluator = FixedEvaluator {
+            best: "e7e5",
+            pv: vec!["e7e5".into(), "g1f3".into()],
+        };
+        assert_eq!(confirm_drillable(&mut evaluator, &mut analysis).unwrap(), 0);
+        assert_eq!(analysis.drillable().len(), 1);
+        assert_eq!(
+            analysis.moves[0].best_line,
+            vec!["e7e5", "g1f3"],
+            "the deeper line should replace the shallow one"
+        );
+    }
+
+    #[test]
+    fn an_answer_a_deeper_search_disagrees_with_never_becomes_a_puzzle() {
+        let mut analysis = GameAnalysis {
+            moves: vec![drillable_move()],
+        };
+        let mut evaluator = FixedEvaluator {
+            best: "c7c5",
+            pv: Vec::new(),
+        };
+        assert_eq!(confirm_drillable(&mut evaluator, &mut analysis).unwrap(), 1);
+        assert!(
+            analysis.drillable().is_empty(),
+            "an unconfirmed answer must not be taught"
+        );
+    }
+
+    #[test]
+    fn confirmation_leaves_sound_moves_alone() {
+        let quiet = MoveAnalysis {
+            severity: None,
+            ..drillable_move()
+        };
+        let mut analysis = GameAnalysis {
+            moves: vec![quiet],
+        };
+        let mut evaluator = FixedEvaluator {
+            best: "anything",
+            pv: Vec::new(),
+        };
+        assert_eq!(confirm_drillable(&mut evaluator, &mut analysis).unwrap(), 0);
     }
 
     #[test]

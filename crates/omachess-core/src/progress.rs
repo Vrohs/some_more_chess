@@ -14,6 +14,10 @@ use chrono::Duration;
 
 use crate::store::{FirstAttempt, GameRecord, PairedSolve, Store};
 
+/// Attempts needed before the rating trajectory is worth drawing. Below this
+/// it is a handful of coin flips with a line through them.
+pub const MIN_RATING_POINTS: usize = 30;
+
 /// First encounters needed in a band before its transfer figure is reported.
 /// Each half must be big enough for the comparison to mean anything.
 pub const MIN_TRANSFER: usize = 12;
@@ -722,10 +726,15 @@ fn summarise_transfer(band: u32, attempts: &[&FirstAttempt]) -> Option<Transfer>
     let split = attempts.len() / 2;
     let (earlier, later) = attempts.split_at(split);
 
-    // Only correct attempts are timed: a fast wrong answer is not fluency.
+    // Only correct attempts are timed, and only ones that were actually being
+    // solved: a fast wrong answer is not fluency, and a five-minute one is
+    // someone who walked away.
     let times = |set: &[&FirstAttempt]| -> Vec<f64> {
         set.iter()
-            .filter(|a| a.correct)
+            .filter(|a| {
+                a.correct
+                    && a.elapsed.num_seconds() <= crate::store::MAX_MEASURED_SECONDS
+            })
             .map(|a| a.elapsed.num_milliseconds() as f64 / 1000.0)
             .collect()
     };
@@ -867,6 +876,34 @@ mod transfer_tests {
     }
 
     #[test]
+    fn an_interrupted_solve_does_not_drag_the_median() {
+        use crate::store::MAX_MEASURED_SECONDS;
+        let mut runs: Vec<(i64, bool)> = (0..8).map(|_| (30, true)).collect();
+        // Later half: normal solves plus one where the solver walked away.
+        runs.extend((0..7).map(|_| (20, true)));
+        runs.push((MAX_MEASURED_SECONDS + 600, true));
+        let result = &transfer_by_band(&store_with(&runs)).unwrap()[0];
+        assert!(
+            (result.later_seconds - 20.0).abs() < 1e-9,
+            "the abandoned puzzle must be excluded, got {}",
+            result.later_seconds
+        );
+    }
+
+    #[test]
+    fn a_solve_exactly_at_the_limit_still_counts() {
+        use crate::store::MAX_MEASURED_SECONDS;
+        let mut runs: Vec<(i64, bool)> = (0..8).map(|_| (30, true)).collect();
+        runs.extend((0..8).map(|_| (MAX_MEASURED_SECONDS, true)));
+        let result = &transfer_by_band(&store_with(&runs)).unwrap()[0];
+        assert!(
+            (result.later_seconds - MAX_MEASURED_SECONDS as f64).abs() < 1e-9,
+            "the boundary must be inclusive, got {}",
+            result.later_seconds
+        );
+    }
+
+    #[test]
     fn a_band_with_no_correct_answers_reports_nothing() {
         let none: Vec<(i64, bool)> = (0..16).map(|_| (30, false)).collect();
         assert!(transfer_by_band(&store_with(&none)).unwrap().is_empty());
@@ -902,6 +939,24 @@ mod interval_tests {
         assert!(
             store.paired_solves().unwrap().is_empty(),
             "solving it again eighteen minutes later is recall, not skill"
+        );
+    }
+
+    #[test]
+    fn an_abandoned_repeat_is_not_measured() {
+        use crate::store::MAX_MEASURED_SECONDS;
+        let store = Store::in_memory().unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap();
+        solve(&store, "a", base, 40);
+        solve(
+            &store,
+            "a",
+            base + Duration::hours(MIN_REPEAT_HOURS as i64 + 1),
+            MAX_MEASURED_SECONDS + 60,
+        );
+        assert!(
+            store.paired_solves().unwrap().is_empty(),
+            "an interrupted solve is not a slower solve"
         );
     }
 

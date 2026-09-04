@@ -7,7 +7,8 @@
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Label, Orientation};
 use omachess_core::progress::{
-    GamePoint, Improvement, PlayTrend, SlopePoint, Transfer, MIN_GAMES, MIN_TRANSFER, SIGNIFICANT,
+    GamePoint, Improvement, PlayTrend, SlopePoint, Transfer, MIN_GAMES, MIN_RATING_POINTS,
+    MIN_TRANSFER, SIGNIFICANT,
 };
 use omachess_core::store::MIN_REPEAT_HOURS;
 
@@ -107,8 +108,14 @@ impl ProgressView {
             }
         }
 
-        if data.ratings.len() >= 2 {
-            self.root.append(&section_title("Puzzle rating"));
+        self.root.append(&section_title("Puzzle rating"));
+        if data.ratings.len() < MIN_RATING_POINTS {
+            self.root.append(&caption(&format!(
+                "{} of {MIN_RATING_POINTS} attempts. A rating line drawn from fewer than that \
+                 is a handful of coin flips with a trend through it, so it is not drawn yet.",
+                data.ratings.len()
+            )));
+        } else {
             self.root.append(&caption(
                 "Replayed from every attempt you have made: solving harder puzzles raises it, \
                  missing easier ones lowers it. It shows the difficulty you can handle, not how \

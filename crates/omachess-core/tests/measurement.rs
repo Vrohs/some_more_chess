@@ -231,3 +231,128 @@ fn the_personal_rating_starts_at_the_floor_and_rises_with_solves() {
     solve_round(&mut store, 0, 20, true);
     assert!(store.personal_rating().unwrap() > f64::from(RATING_FLOOR));
 }
+
+/// The exact sequence the trainer performs, driven headlessly.
+///
+/// The GTK layer only draws and dispatches; every decision it makes is one of
+/// these calls. Running the sequence here covers the loop without a display.
+#[test]
+fn the_full_training_loop_behaves_across_a_mode_switch() {
+    use omachess_core::progress::measured_improvement;
+    use omachess_core::puzzle::{Attempt, MoveOutcome};
+
+    let mut store = loaded_store();
+    let session = Session::new();
+    let start = Utc.with_ymd_and_hms(2026, 5, 1, 9, 0, 0).unwrap();
+
+    // Learn mode: work through unseen puzzles, solving each properly.
+    store.set_repeat_mode(false).unwrap();
+    let mut solved = Vec::new();
+    for i in 0..IDS.len() {
+        let now = start + Duration::minutes(i as i64 * 3);
+        let puzzle = session
+            .next_puzzle(&store, now)
+            .unwrap()
+            .expect("learn mode should always have something unseen");
+        assert!(
+            !solved.contains(&puzzle.id),
+            "learn mode re-served {}",
+            puzzle.id
+        );
+
+        // Solve it the way the board does: play the recorded answer.
+        let mut attempt = Attempt::new(&puzzle).unwrap();
+        let expected = attempt.expected().unwrap().to_owned();
+        let mv = attempt.parse_move(&expected).unwrap();
+        assert_eq!(attempt.play(&mv).unwrap(), MoveOutcome::Solved);
+
+        session
+            .submit(
+                &mut store,
+                &Solve {
+                    puzzle_id: puzzle.id.clone(),
+                    puzzle_rating: puzzle.rating,
+                    correct: true,
+                    elapsed: Duration::seconds(40),
+                },
+                now,
+            )
+            .unwrap();
+        solved.push(puzzle.id);
+    }
+
+    assert_eq!(store.solved_count().unwrap(), IDS.len() as u64);
+    assert!(
+        measured_improvement(&store).unwrap().is_none(),
+        "a first pass is never progress"
+    );
+
+    // Repeat mode, the next day: the same puzzles come back, solved faster.
+    store.set_repeat_mode(true).unwrap();
+    for i in 0..IDS.len() {
+        let now = start + Duration::hours(30) + Duration::minutes(i as i64 * 3);
+        let puzzle = session
+            .next_puzzle(&store, now)
+            .unwrap()
+            .expect("repeat mode should serve solved puzzles");
+        assert!(
+            solved.contains(&puzzle.id),
+            "repeat mode served an unseen puzzle: {}",
+            puzzle.id
+        );
+        session
+            .submit(
+                &mut store,
+                &Solve {
+                    puzzle_id: puzzle.id.clone(),
+                    puzzle_rating: puzzle.rating,
+                    correct: true,
+                    elapsed: Duration::seconds(16),
+                },
+                now,
+            )
+            .unwrap();
+    }
+
+    let result = measured_improvement(&store)
+        .unwrap()
+        .expect("a day later, the repeats count");
+    assert!(result.median_speedup > 2.0, "40s to 16s is 2.5x");
+    assert!(result.is_significant(), "p was {}", result.p_value);
+}
+
+/// Solving the same puzzle again within the session must never register as
+/// progress, however much faster it was.
+#[test]
+fn a_same_session_repeat_is_recorded_but_never_measured() {
+    let mut store = loaded_store();
+    let session = Session::new();
+    let start = Utc.with_ymd_and_hms(2026, 5, 1, 9, 0, 0).unwrap();
+
+    for round in 0..2 {
+        for (index, id) in IDS.iter().enumerate() {
+            session
+                .submit(
+                    &mut store,
+                    &Solve {
+                        puzzle_id: (*id).to_owned(),
+                        puzzle_rating: 1150,
+                        correct: true,
+                        elapsed: Duration::seconds(if round == 0 { 40 } else { 5 }),
+                    },
+                    start + Duration::minutes(round * 30 + index as i64),
+                )
+                .unwrap();
+        }
+    }
+
+    assert_eq!(
+        store.attempt_log().unwrap().len(),
+        IDS.len() * 2,
+        "both rounds must still be recorded"
+    );
+    assert!(
+        measured_improvement(&store).unwrap().is_none(),
+        "half an hour later is recall, not skill"
+    );
+}

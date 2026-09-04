@@ -41,6 +41,11 @@ const DEFAULT_CSS: &str = r#"
 .omachess-square.pressed {
     box-shadow: inset 0 0 0 3px rgba(255, 241, 138, 0.55);
 }
+/* The keyboard cursor: distinct from selection, since one is where you are
+   looking and the other is what you have picked up. */
+.omachess-square.cursor {
+    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.75);
+}
 .omachess-square.selected {
     box-shadow: inset 0 0 0 3px rgba(255, 241, 138, 0.95);
 }

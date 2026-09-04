@@ -91,6 +91,12 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 "#;
 
+/// A solve longer than this was not a solve: the solver walked away, took a
+/// call, or left the window open. Such attempts are still recorded — they are
+/// what happened — but they are excluded from every timing figure, because one
+/// interrupted puzzle would otherwise dominate a median.
+pub const MAX_MEASURED_SECONDS: i64 = 300;
+
 /// A repeat sooner than this is recall of a specific position, not evidence of
 /// skill: you remember the puzzle you saw this morning. Only re-solves at least
 /// this far apart are counted as measurement.
@@ -518,7 +524,7 @@ impl Store {
                         ROW_NUMBER() OVER (PARTITION BY puzzle_id ORDER BY reviewed_at DESC) AS last_rank,
                         COUNT(*)   OVER (PARTITION BY puzzle_id)                             AS solves
                  FROM attempts
-                 WHERE correct = 1
+                 WHERE correct = 1 AND elapsed_ms <= ?2
              )
              SELECT f.puzzle_id, f.band, f.elapsed_ms, l.elapsed_ms, f.solves
              FROM ok f
@@ -527,7 +533,7 @@ impl Store {
                AND f.solves >= 2
                AND (julianday(l.reviewed_at) - julianday(f.reviewed_at)) * 24.0 >= ?1",
         )?;
-        let rows = stmt.query_map(params![MIN_REPEAT_HOURS], |r| {
+        let rows = stmt.query_map(params![MIN_REPEAT_HOURS, MAX_MEASURED_SECONDS * 1000], |r| {
             Ok(PairedSolve {
                 puzzle_id: r.get(0)?,
                 band: r.get(1)?,
