@@ -17,6 +17,7 @@ use crate::charts;
 /// Everything the page needs, gathered once.
 pub struct ProgressData {
     pub weaknesses: Vec<Weakness>,
+    pub baseline_success: f64,
     pub transfer: Vec<Transfer>,
     pub overall: Option<Improvement>,
     pub bands: Vec<(u32, Improvement)>,
@@ -68,7 +69,7 @@ impl ProgressView {
                  actually missed, not from a syllabus.",
             ));
             for weakness in &data.weaknesses {
-                self.root.append(&weakness_row(weakness));
+                self.root.append(&weakness_row(weakness, data.baseline_success));
             }
         }
 
@@ -221,13 +222,15 @@ fn transfer_row(transfer: &Transfer) -> GtkBox {
 }
 
 /// One recurring weakness, with the evidence beside it.
-fn weakness_row(weakness: &Weakness) -> Label {
+fn weakness_row(weakness: &Weakness, baseline: f64) -> Label {
     let label = Label::builder()
         .label(format!(
-            "{:<18} {:.0}% solved over {} attempts",
+            "{:<16} {:>3.0}%  over {:>3} attempts   {:.0} points below your {:.0}% average",
             weakness.theme,
             weakness.success * 100.0,
-            weakness.attempts
+            weakness.attempts,
+            (baseline - weakness.success) * 100.0,
+            baseline * 100.0
         ))
         .halign(Align::Start)
         .build();

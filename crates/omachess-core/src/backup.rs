@@ -63,6 +63,9 @@ pub struct GameRow {
     /// failing to load.
     #[serde(default)]
     pub source: String,
+    /// Per-phase loss and move counts, absent in older backups.
+    #[serde(default)]
+    pub phases: Option<[(f64, u32); 3]>,
 }
 
 /// What a restore actually changed.
@@ -98,6 +101,11 @@ pub fn export(store: &Store) -> Result<String> {
                 mistakes: g.mistakes,
                 inaccuracies: g.inaccuracies,
                 source: g.source,
+                phases: Some([
+                    (g.phases[0].mean_loss, g.phases[0].moves),
+                    (g.phases[1].mean_loss, g.phases[1].moves),
+                    (g.phases[2].mean_loss, g.phases[2].moves),
+                ]),
             })
             .collect(),
         settings: store.export_settings()?,
@@ -159,6 +167,10 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
             mistakes: game.mistakes,
             inaccuracies: game.inaccuracies,
             source: game.source.clone(),
+            phases: game.phases.map_or(
+                [crate::store::PhaseLoss::UNKNOWN; 3],
+                |p| p.map(|(mean_loss, moves)| crate::store::PhaseLoss { mean_loss, moves }),
+            ),
         })?;
         report.games_added += 1;
     }
@@ -214,6 +226,7 @@ mod tests {
                 mistakes: 1,
                 inaccuracies: 3,
                 source: String::new(),
+                phases: [crate::store::PhaseLoss::UNKNOWN; 3],
             })
             .unwrap();
         let card = rs_fsrs::Card::new();

@@ -225,8 +225,11 @@ impl Trainer {
     pub fn progress_data(&self) -> ProgressData {
         use omachess_core::progress as p;
         let store = self.store.borrow();
+        let (weaknesses, baseline_success) =
+            p::recurring_weaknesses(&store).unwrap_or_default();
         ProgressData {
-            weaknesses: p::recurring_weaknesses(&store).unwrap_or_default(),
+            weaknesses,
+            baseline_success,
             transfer: p::transfer_by_band(&store).unwrap_or_default(),
             overall: p::measured_improvement(&store).unwrap_or_default(),
             bands: p::improvement_by_band(&store).unwrap_or_default(),

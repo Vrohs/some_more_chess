@@ -135,15 +135,19 @@ fn command_progress() -> anyhow::Result<()> {
     );
     println!("solved     {} distinct puzzles", store.solved_count()?);
 
-    let weak = omachess_core::progress::recurring_weaknesses(&store)?;
+    let (weak, baseline) = omachess_core::progress::recurring_weaknesses(&store)?;
     if !weak.is_empty() {
-        println!("\n-- what keeps costing you --");
+        println!(
+            "\n-- what keeps costing you (you solve {:.0}% overall) --",
+            baseline * 100.0
+        );
         for w in &weak {
             println!(
-                "  {:<18} {:>3.0}% solved over {} attempts",
+                "  {:<18} {:>3.0}% over {} attempts   {:.0} points below your average",
                 w.theme,
                 w.success * 100.0,
-                w.attempts
+                w.attempts,
+                (baseline - w.success) * 100.0
             );
         }
     }
@@ -324,6 +328,13 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
     };
     let store = open_store()?;
 
+    // Re-importing after the analysis itself has changed needs the old rows
+    // gone, since games are otherwise skipped as already present.
+    if std::env::args().any(|a| a == "--reanalyse") {
+        let removed = store.forget_imported_games()?;
+        println!("forgot {removed} previously imported games so they can be analysed again");
+    }
+
     // The name is remembered, so this is only needed once.
     let player = match name {
         Some(name) => {
@@ -399,6 +410,21 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
             mistakes: counts.mistakes as u32,
             inaccuracies: counts.inaccuracies as u32,
             source,
+            phases: {
+                use omachess_core::review::Phase;
+                use omachess_core::store::PhaseLoss;
+                let by_phase = analysis.by_phase();
+                [Phase::Opening, Phase::Middlegame, Phase::Endgame].map(|want| {
+                    by_phase
+                        .iter()
+                        .find(|(phase, _, _)| *phase == want)
+                        .map(|(_, loss, moves)| PhaseLoss {
+                            mean_loss: *loss,
+                            moves: *moves as u32,
+                        })
+                        .unwrap_or(PhaseLoss::UNKNOWN)
+                })
+            },
         })?;
         imported += 1;
     }

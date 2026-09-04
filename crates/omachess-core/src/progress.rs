@@ -400,6 +400,7 @@ mod game_tests {
             mistakes: 0,
             inaccuracies: 0,
             source: String::new(),
+            phases: [crate::store::PhaseLoss::UNKNOWN; 3],
         }
     }
 
@@ -1004,21 +1005,31 @@ pub struct Weakness {
 /// Attempts on a theme before it is worth naming. Below this a run of bad luck
 /// looks identical to a weakness.
 pub const MIN_THEME_ATTEMPTS: u32 = 10;
-/// Success at or above this is not a weakness worth drilling.
-pub const WEAK_BELOW: f64 = 0.75;
+/// How far below your own average a theme must sit before it is named. An
+/// absolute bar would flag everything for a weaker solver and nothing for a
+/// stronger one; the comparison that means something is against yourself.
+pub const WEAKNESS_MARGIN: f64 = 0.10;
 
-/// Themes the solver is worst at, worst first.
-pub fn recurring_weaknesses(store: &Store) -> Result<Vec<Weakness>> {
-    Ok(store
+/// Themes the solver handles worse than they handle puzzles generally, worst
+/// first, together with the baseline they are being judged against.
+pub fn recurring_weaknesses(store: &Store) -> Result<(Vec<Weakness>, f64)> {
+    let baseline = store.overall_success()?;
+    let mut weak: Vec<Weakness> = store
         .theme_success(MIN_THEME_ATTEMPTS)?
         .into_iter()
-        .filter(|(_, rate, _)| *rate < WEAK_BELOW)
+        .filter(|(_, rate, _)| *rate + WEAKNESS_MARGIN < baseline)
         .map(|(theme, success, attempts)| Weakness {
             theme,
             attempts,
             success,
         })
-        .collect())
+        .collect();
+    weak.sort_by(|a, b| {
+        a.success
+            .partial_cmp(&b.success)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok((weak, baseline))
 }
 
 #[cfg(test)]
@@ -1057,42 +1068,82 @@ mod weakness_tests {
         store
     }
 
+    /// Forks go badly, pins go well. The comparison is between them, not
+    /// against a fixed bar.
+    fn mixed(fork_correct: usize, fork_total: usize) -> Store {
+        let mut attempts: Vec<(&str, bool)> =
+            (0..fork_total).map(|i| ("fork1", i < fork_correct)).collect();
+        attempts.extend((0..12).map(|_| ("pin1", true)));
+        store_with(&[("fork1", "fork"), ("pin1", "pin")], &attempts)
+    }
+
     #[test]
-    fn a_theme_that_keeps_going_wrong_is_named() {
-        let attempts: Vec<(&str, bool)> = (0..12).map(|i| ("p1", i % 4 == 0)).collect();
-        let store = store_with(&[("p1", "fork")], &attempts);
-        let weak = recurring_weaknesses(&store).unwrap();
-        assert_eq!(weak.len(), 1);
+    fn a_theme_you_handle_worse_than_the_rest_is_named() {
+        let store = mixed(3, 12);
+        let (weak, baseline) = recurring_weaknesses(&store).unwrap();
+        assert!(baseline > 0.5, "the baseline is your own average: {baseline}");
+        assert_eq!(weak.len(), 1, "only the fork should stand out: {weak:?}");
         assert_eq!(weak[0].theme, "fork");
-        assert!(weak[0].success < WEAK_BELOW);
         assert_eq!(weak[0].attempts, 12);
-    }
-
-    #[test]
-    fn a_theme_going_well_is_not_called_a_weakness() {
-        let attempts: Vec<(&str, bool)> = (0..12).map(|_| ("p1", true)).collect();
-        let store = store_with(&[("p1", "pin")], &attempts);
-        assert!(recurring_weaknesses(&store).unwrap().is_empty());
-    }
-
-    #[test]
-    fn too_few_attempts_is_not_evidence_of_anything() {
-        let attempts: Vec<(&str, bool)> = (0..(MIN_THEME_ATTEMPTS as usize - 1))
-            .map(|_| ("p1", false))
-            .collect();
-        let store = store_with(&[("p1", "skewer")], &attempts);
-        assert!(
-            recurring_weaknesses(&store).unwrap().is_empty(),
-            "a short bad run is not a weakness"
-        );
+        assert!(weak[0].success + WEAKNESS_MARGIN < baseline);
     }
 
     #[test]
     fn the_worst_theme_comes_first() {
-        let mut attempts: Vec<(&str, bool)> = (0..12).map(|i| ("bad", i % 6 == 0)).collect();
-        attempts.extend((0..12).map(|i| ("mid", i % 2 == 0)));
-        let store = store_with(&[("bad", "fork"), ("mid", "pin")], &attempts);
-        let weak = recurring_weaknesses(&store).unwrap();
-        assert_eq!(weak.first().map(|w| w.theme.as_str()), Some("fork"));
+        let mut attempts: Vec<(&str, bool)> = (0..12).map(|i| ("fork1", i < 5)).collect();
+        attempts.extend((0..12).map(|i| ("skew1", i < 2)));
+        attempts.extend((0..12).map(|_| ("pin1", true)));
+        let store = store_with(
+            &[("fork1", "fork"), ("skew1", "skewer"), ("pin1", "pin")],
+            &attempts,
+        );
+        let (weak, _) = recurring_weaknesses(&store).unwrap();
+        assert_eq!(
+            weak.iter().map(|w| w.theme.as_str()).collect::<Vec<_>>(),
+            ["skewer", "fork"],
+            "the worst one leads"
+        );
+    }
+
+    #[test]
+    fn a_theme_going_as_well_as_everything_else_is_not_a_weakness() {
+        let store = mixed(12, 12);
+        let (weak, _) = recurring_weaknesses(&store).unwrap();
+        assert!(weak.is_empty(), "solving them all is not a blind spot: {weak:?}");
+    }
+
+    #[test]
+    fn a_theme_only_a_whisker_below_average_is_not_called_out() {
+        // Eleven of twelve against a perfect baseline: barely different.
+        let store = mixed(11, 12);
+        let (weak, _) = recurring_weaknesses(&store).unwrap();
+        assert!(
+            weak.is_empty(),
+            "a small gap is noise, not a diagnosis: {weak:?}"
+        );
+    }
+
+    #[test]
+    fn too_few_attempts_is_not_evidence_of_anything() {
+        let short = MIN_THEME_ATTEMPTS as usize - 1;
+        let mut attempts: Vec<(&str, bool)> = (0..short).map(|_| ("fork1", false)).collect();
+        attempts.extend((0..12).map(|_| ("pin1", true)));
+        let store = store_with(&[("fork1", "fork"), ("pin1", "pin")], &attempts);
+        let (weak, _) = recurring_weaknesses(&store).unwrap();
+        assert!(
+            weak.is_empty(),
+            "a short bad run is not a weakness: {weak:?}"
+        );
+    }
+
+    #[test]
+    fn a_solver_who_is_uniformly_weak_has_no_standout_weakness() {
+        // Everything at 50%. Nothing is worse than anything else, so naming a
+        // theme would be inventing a pattern.
+        let mut attempts: Vec<(&str, bool)> = (0..12).map(|i| ("fork1", i % 2 == 0)).collect();
+        attempts.extend((0..12).map(|i| ("pin1", i % 2 == 0)));
+        let store = store_with(&[("fork1", "fork"), ("pin1", "pin")], &attempts);
+        let (weak, _) = recurring_weaknesses(&store).unwrap();
+        assert!(weak.is_empty(), "uniform weakness is not a motif: {weak:?}");
     }
 }

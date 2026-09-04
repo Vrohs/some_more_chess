@@ -156,6 +156,28 @@ pub struct GameRecord {
     /// Where the game came from, for imported games. Empty for games played
     /// in the application.
     pub source: String,
+    /// Mean win probability given away per move in each phase, and how many
+    /// moves were played in it. A loss of -1 means the game predates the
+    /// breakdown being recorded.
+    pub phases: [PhaseLoss; 3],
+}
+
+/// One phase of one game.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhaseLoss {
+    pub mean_loss: f64,
+    pub moves: u32,
+}
+
+impl PhaseLoss {
+    pub const UNKNOWN: Self = Self {
+        mean_loss: -1.0,
+        moves: 0,
+    };
+
+    pub fn is_known(&self) -> bool {
+        self.mean_loss >= 0.0 && self.moves > 0
+    }
 }
 
 /// A recorded solve, as stored.
@@ -209,10 +231,18 @@ impl Store {
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as u32;
 
         // Steps are appended here and never renumbered or edited once shipped.
-        let steps: [&str; 1] = [
+        let steps: [&str; 2] = [
             // Imported games need an identity of their own so a re-import does
             // not duplicate them; games played in the app leave it empty.
             "ALTER TABLE games ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+            // Where a game leaked is far more useful than how much it leaked in
+            // total, and it was being computed during analysis and discarded.
+            "ALTER TABLE games ADD COLUMN opening_loss REAL NOT NULL DEFAULT -1;
+             ALTER TABLE games ADD COLUMN middlegame_loss REAL NOT NULL DEFAULT -1;
+             ALTER TABLE games ADD COLUMN endgame_loss REAL NOT NULL DEFAULT -1;
+             ALTER TABLE games ADD COLUMN opening_moves INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE games ADD COLUMN middlegame_moves INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE games ADD COLUMN endgame_moves INTEGER NOT NULL DEFAULT 0",
         ];
 
         for (index, sql) in steps.iter().enumerate() {
@@ -492,6 +522,17 @@ impl Store {
             .collect())
     }
 
+    /// Fraction of all attempts solved. A motif is judged against this rather
+    /// than an absolute bar: the useful question is not "are you good at forks"
+    /// but "are forks worse for you than everything else you do".
+    pub fn overall_success(&self) -> Result<f64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COALESCE(AVG(correct), 0.0) FROM attempts", [], |r| {
+                r.get(0)
+            })?)
+    }
+
     /// Success rate per theme, for themes with at least `min_attempts` tries.
     /// Used to steer selection toward weaknesses.
     pub fn theme_success(&self, min_attempts: u32) -> Result<Vec<(String, f64, u32)>> {
@@ -630,8 +671,11 @@ impl Store {
         self.conn.execute(
             "INSERT INTO games
              (played_at, player_white, opponent_elo, result, moves, accuracy,
-              mean_loss, blunders, mistakes, inaccuracies, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              mean_loss, blunders, mistakes, inaccuracies, source,
+              opening_loss, middlegame_loss, endgame_loss,
+              opening_moves, middlegame_moves, endgame_moves)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                     ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 game.played_at,
                 game.player_white as i64,
@@ -644,9 +688,23 @@ impl Store {
                 game.mistakes,
                 game.inaccuracies,
                 game.source,
+                game.phases[0].mean_loss,
+                game.phases[1].mean_loss,
+                game.phases[2].mean_loss,
+                game.phases[0].moves,
+                game.phases[1].moves,
+                game.phases[2].moves,
             ],
         )?;
         Ok(())
+    }
+
+    /// Forget every imported game, so an export can be analysed again after
+    /// the analysis itself has changed.
+    pub fn forget_imported_games(&self) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM games WHERE source <> ''", [])?)
     }
 
     /// Whether a game from this source is already stored.
@@ -665,7 +723,9 @@ impl Store {
     pub fn games(&self) -> Result<Vec<GameRecord>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT played_at, player_white, opponent_elo, result, moves, accuracy,
-                    mean_loss, blunders, mistakes, inaccuracies, source
+                    mean_loss, blunders, mistakes, inaccuracies, source,
+                    opening_loss, middlegame_loss, endgame_loss,
+                    opening_moves, middlegame_moves, endgame_moves
              FROM games ORDER BY played_at ASC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -681,6 +741,11 @@ impl Store {
                 mistakes: r.get(8)?,
                 inaccuracies: r.get(9)?,
                 source: r.get(10)?,
+                phases: [
+                    PhaseLoss { mean_loss: r.get(11)?, moves: r.get(14)? },
+                    PhaseLoss { mean_loss: r.get(12)?, moves: r.get(15)? },
+                    PhaseLoss { mean_loss: r.get(13)?, moves: r.get(16)? },
+                ],
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)

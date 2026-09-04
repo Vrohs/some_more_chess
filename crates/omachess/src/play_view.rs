@@ -902,6 +902,7 @@ impl PlayView {
             mistakes: counts.mistakes as u32,
             inaccuracies: counts.inaccuracies as u32,
             source: String::new(),
+            phases: phase_losses(analysis),
         };
         let opponent = f64::from(record.opponent_elo);
         {
@@ -1027,6 +1028,23 @@ impl PlayView {
 
 /// A stable id for a position the player got wrong, so blundering the same way
 /// twice updates one puzzle rather than accumulating duplicates.
+/// Per-phase loss in the order the store expects: opening, middlegame, endgame.
+fn phase_losses(analysis: &GameAnalysis) -> [omachess_core::store::PhaseLoss; 3] {
+    use omachess_core::review::Phase;
+    use omachess_core::store::PhaseLoss;
+    let by_phase = analysis.by_phase();
+    [Phase::Opening, Phase::Middlegame, Phase::Endgame].map(|want| {
+        by_phase
+            .iter()
+            .find(|(phase, _, _)| *phase == want)
+            .map(|(_, loss, moves)| PhaseLoss {
+                mean_loss: *loss,
+                moves: *moves as u32,
+            })
+            .unwrap_or(PhaseLoss::UNKNOWN)
+    })
+}
+
 /// The quality of a game, stated without reference to who won.
 ///
 /// A win against a weak opponent and a loss against a strong one say little
