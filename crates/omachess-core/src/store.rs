@@ -659,6 +659,97 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    // -- backup ----------------------------------------------------------
+
+    pub fn export_attempts(&self) -> Result<Vec<crate::backup::AttemptRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT puzzle_id, reviewed_at, elapsed_ms, correct, grade, puzzle_rating
+             FROM attempts ORDER BY reviewed_at ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::backup::AttemptRow {
+                puzzle_id: r.get(0)?,
+                reviewed_at: r.get(1)?,
+                elapsed_ms: r.get(2)?,
+                correct: r.get::<_, i64>(3)? != 0,
+                grade: r.get(4)?,
+                puzzle_rating: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn export_cards(&self) -> Result<Vec<crate::backup::CardRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT puzzle_id, due, stability, difficulty, elapsed_days, scheduled_days,
+                    reps, lapses, state, last_review
+             FROM cards ORDER BY puzzle_id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::backup::CardRow {
+                puzzle_id: r.get(0)?,
+                due: r.get(1)?,
+                stability: r.get(2)?,
+                difficulty: r.get(3)?,
+                elapsed_days: r.get(4)?,
+                scheduled_days: r.get(5)?,
+                reps: r.get(6)?,
+                lapses: r.get(7)?,
+                state: r.get(8)?,
+                last_review: r.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn export_settings(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT key, value FROM settings ORDER BY key ASC")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Whether this exact attempt is already recorded, so a restore can be run
+    /// twice without doubling the history.
+    pub fn has_attempt(&self, puzzle_id: &str, at: DateTime<Utc>) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM attempts WHERE puzzle_id = ?1 AND reviewed_at = ?2",
+            params![puzzle_id, at],
+            |r| r.get::<_, i64>(0),
+        )? > 0)
+    }
+
+    pub fn has_game(&self, at: DateTime<Utc>) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM games WHERE played_at = ?1",
+            params![at],
+            |r| r.get::<_, i64>(0),
+        )? > 0)
+    }
+
+    pub fn write_card_row(&self, card: &crate::backup::CardRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO cards
+             (puzzle_id, due, stability, difficulty, elapsed_days, scheduled_days,
+              reps, lapses, state, last_review)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                card.puzzle_id,
+                card.due,
+                card.stability,
+                card.difficulty,
+                card.elapsed_days,
+                card.scheduled_days,
+                card.reps,
+                card.lapses,
+                card.state,
+                card.last_review,
+            ],
+        )?;
+        Ok(())
+    }
+
     // -- settings --------------------------------------------------------
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {

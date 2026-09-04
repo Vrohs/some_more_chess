@@ -10,6 +10,7 @@ mod progress_view;
 mod style;
 mod trainer;
 
+use anyhow::Context;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -32,6 +33,8 @@ fn main() -> ExitCode {
         Some("status") => command_status(),
         Some("progress") => command_progress(),
         Some("games") => command_games(),
+        Some("export") => command_export(args.get(1).map(PathBuf::from)),
+        Some("restore") => command_restore(args.get(1).map(PathBuf::from)),
         Some("--help" | "-h") => {
             print_usage();
             Ok(())
@@ -58,6 +61,8 @@ USAGE:
     omachess status          Report what is stored
     omachess progress        Show the time-to-solve trend per rating band
     omachess games           Show how well you have been playing the engine
+    omachess export <FILE>   Write your history to a file you can keep
+    omachess restore <FILE>  Merge a history file back in
 
 The puzzle export is CC0 and lives at
     {}
@@ -246,6 +251,42 @@ fn command_games() -> anyhow::Result<()> {
              halves can be compared."
         ),
     }
+    Ok(())
+}
+
+fn command_export(path: Option<PathBuf>) -> anyhow::Result<()> {
+    let Some(path) = path else {
+        anyhow::bail!("usage: omachess export <file.json>");
+    };
+    let store = open_store()?;
+    let json = omachess_core::backup::export(&store)?;
+    std::fs::write(&path, &json)
+        .with_context(|| format!("writing {}", path.display()))?;
+    println!(
+        "Wrote {} KB to {}\nPuzzles can be downloaded again; this cannot. Keep it somewhere else.",
+        json.len() / 1024,
+        path.display()
+    );
+    Ok(())
+}
+
+fn command_restore(path: Option<PathBuf>) -> anyhow::Result<()> {
+    let Some(path) = path else {
+        anyhow::bail!("usage: omachess restore <file.json>");
+    };
+    let json = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let mut store = open_store()?;
+    let report = omachess_core::backup::restore(&mut store, &json)?;
+    println!(
+        "attempts  {} added, {} already present\ncards     {} written\ngames     {} added, {} already present\nsettings  {} written",
+        report.attempts_added,
+        report.attempts_skipped,
+        report.cards_written,
+        report.games_added,
+        report.games_skipped,
+        report.settings_written,
+    );
     Ok(())
 }
 

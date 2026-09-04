@@ -4,6 +4,7 @@
 //! scheduling and grading logic — the part that carries the project's core
 //! claim about measuring improvement — can be tested in isolation.
 
+pub mod backup;
 pub mod drill;
 pub mod engine;
 pub mod game;
