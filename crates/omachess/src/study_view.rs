@@ -50,6 +50,14 @@ pub struct StudyView {
     /// Identifies the request for the position on the board, so a slow reply
     /// for a position already left behind is discarded instead of shown.
     token: Cell<u64>,
+    /// Whether the engine is busy. Only one request is ever outstanding:
+    /// queueing one per keypress means stepping through a game faster than the
+    /// engine can think builds a backlog of answers nobody will ever see, which
+    /// looks exactly like the application having stopped.
+    busy: Cell<bool>,
+    /// Set when the board moved on while the engine was busy, so the position
+    /// actually on screen is asked about as soon as it is free.
+    pending: Cell<bool>,
 }
 
 impl StudyView {
@@ -179,6 +187,8 @@ impl StudyView {
             prev: prev.clone(),
             next: next.clone(),
             token: Cell::new(0),
+            busy: Cell::new(false),
+            pending: Cell::new(false),
         });
 
         let weak: Weak<Self> = Rc::downgrade(&view);
@@ -401,20 +411,38 @@ impl StudyView {
         });
         self.variation.set_label("Thinking…");
 
+        if self.worker.is_none() {
+            self.variation.set_label("");
+            return;
+        }
+        self.request_evaluation();
+    }
+
+    /// Ask about the position on the board, unless the engine is already busy —
+    /// in which case note that it should be asked again the moment it is free.
+    fn request_evaluation(&self) {
+        let Some(worker) = &self.worker else {
+            return;
+        };
+        if self.busy.get() {
+            self.pending.set(true);
+            return;
+        }
+        let Some(moves) = self.walk.borrow().as_ref().map(|w| w.moves_so_far().to_vec()) else {
+            return;
+        };
         // Tag the request so a reply for a position already left cannot be
         // shown against this one.
         let token = self.token.get().wrapping_add(1);
         self.token.set(token);
-        if let Some(worker) = &self.worker {
-            worker.send(Request::Evaluate {
-                fen: START_FEN.to_owned(),
-                moves: moves_so_far,
-                depth: STUDY_DEPTH,
-                token,
-            });
-        } else {
-            self.variation.set_label("");
-        }
+        self.busy.set(true);
+        self.pending.set(false);
+        worker.send(Request::Evaluate {
+            fen: START_FEN.to_owned(),
+            moves,
+            depth: STUDY_DEPTH,
+            token,
+        });
     }
 
     fn drain_engine(self: &Rc<Self>) {
@@ -429,11 +457,18 @@ impl StudyView {
             }
             match reply {
                 Reply::Evaluation { analysis, token } => {
+                    self.busy.set(false);
                     if token == self.token.get() {
                         self.show_evaluation(&analysis);
                     }
+                    if self.pending.get() {
+                        self.request_evaluation();
+                    }
                 }
-                Reply::Failed(message) => self.variation.set_label(&format!("Engine: {message}")),
+                Reply::Failed(message) => {
+                    self.busy.set(false);
+                    self.variation.set_label(&format!("Engine: {message}"));
+                }
                 _ => {}
             }
         }

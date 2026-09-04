@@ -7,8 +7,8 @@
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Label, Orientation};
 use omachess_core::progress::{
-    GamePoint, Improvement, PlayTrend, SlopePoint, Transfer, MIN_GAMES, MIN_RATING_POINTS,
-    MIN_TRANSFER, SIGNIFICANT,
+    GamePoint, Improvement, PlayTrend, SlopePoint, Transfer, Weakness, MIN_GAMES,
+    MIN_RATING_POINTS, MIN_THEME_ATTEMPTS, MIN_TRANSFER, SIGNIFICANT,
 };
 use omachess_core::store::MIN_REPEAT_HOURS;
 
@@ -16,6 +16,7 @@ use crate::charts;
 
 /// Everything the page needs, gathered once.
 pub struct ProgressData {
+    pub weaknesses: Vec<Weakness>,
     pub transfer: Vec<Transfer>,
     pub overall: Option<Improvement>,
     pub bands: Vec<(u32, Improvement)>,
@@ -53,7 +54,25 @@ impl ProgressView {
             self.root.remove(&child);
         }
 
-        // Transfer leads, because it is the only figure that means "better at
+        // The diagnosis leads: what keeps going wrong is more use than any
+        // number, because it is the only thing here you can act on tomorrow.
+        self.root.append(&section_title("What keeps costing you"));
+        if data.weaknesses.is_empty() {
+            self.root.append(&caption(&format!(
+                "Nothing stands out yet. A theme needs {MIN_THEME_ATTEMPTS} attempts before a bad \
+                 run can be told apart from a real weakness.",
+            )));
+        } else {
+            self.root.append(&caption(
+                "Themes you get wrong most often, worst first. These are drawn from what you \
+                 actually missed, not from a syllabus.",
+            ));
+            for weakness in &data.weaknesses {
+                self.root.append(&weakness_row(weakness));
+            }
+        }
+
+        // Transfer next, because it is the only figure that means "better at
         // chess" rather than "better at these puzzles".
         self.root
             .append(&section_title("On puzzles you have never seen"));
@@ -199,6 +218,21 @@ fn transfer_row(transfer: &Transfer) -> GtkBox {
     outer.append(&headline);
     outer.append(&detail);
     outer
+}
+
+/// One recurring weakness, with the evidence beside it.
+fn weakness_row(weakness: &Weakness) -> Label {
+    let label = Label::builder()
+        .label(format!(
+            "{:<18} {:.0}% solved over {} attempts",
+            weakness.theme,
+            weakness.success * 100.0,
+            weakness.attempts
+        ))
+        .halign(Align::Start)
+        .build();
+    label.add_css_class("monospace");
+    label
 }
 
 fn section_title(text: &str) -> Label {

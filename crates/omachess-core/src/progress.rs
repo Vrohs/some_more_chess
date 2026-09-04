@@ -987,3 +987,112 @@ mod interval_tests {
         assert_eq!(ids, vec!["late"], "only the one past the threshold counts");
     }
 }
+
+
+/// A theme that keeps costing the solver, with the evidence for saying so.
+///
+/// This is the closest thing here to a diagnosis: not "you played badly" but
+/// "forks are where it goes wrong, over this many attempts". It is drawn from
+/// what actually happened rather than from a curriculum someone wrote.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Weakness {
+    pub theme: String,
+    pub attempts: u32,
+    pub success: f64,
+}
+
+/// Attempts on a theme before it is worth naming. Below this a run of bad luck
+/// looks identical to a weakness.
+pub const MIN_THEME_ATTEMPTS: u32 = 10;
+/// Success at or above this is not a weakness worth drilling.
+pub const WEAK_BELOW: f64 = 0.75;
+
+/// Themes the solver is worst at, worst first.
+pub fn recurring_weaknesses(store: &Store) -> Result<Vec<Weakness>> {
+    Ok(store
+        .theme_success(MIN_THEME_ATTEMPTS)?
+        .into_iter()
+        .filter(|(_, rate, _)| *rate < WEAK_BELOW)
+        .map(|(theme, success, attempts)| Weakness {
+            theme,
+            attempts,
+            success,
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod weakness_tests {
+    use super::*;
+    use crate::ingest::ingest_csv;
+    use crate::store::AttemptRecord;
+    use chrono::{Duration, TimeZone, Utc};
+    use rs_fsrs::Rating;
+
+    const CSV: &str = "PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate\n";
+
+    fn store_with(rows: &[(&str, &str)], attempts: &[(&str, bool)]) -> Store {
+        let mut csv = String::from(CSV);
+        for (id, themes) in rows {
+            csv.push_str(&format!(
+                "{id},6k1/5ppp/8/8/8/8/5PPP/1R4K1 b - - 0 1,g8h8 b1b8,1150,75,90,100,{themes},https://x,,\n"
+            ));
+        }
+        let mut store = Store::in_memory().unwrap();
+        ingest_csv(&mut store, csv.as_bytes(), crate::grade::RATING_FLOOR).unwrap();
+
+        let base = Utc.with_ymd_and_hms(2026, 4, 1, 9, 0, 0).unwrap();
+        for (i, (id, correct)) in attempts.iter().enumerate() {
+            store
+                .record_attempt(&AttemptRecord {
+                    puzzle_id: (*id).to_owned(),
+                    reviewed_at: base + Duration::minutes(i as i64),
+                    elapsed: Duration::seconds(20),
+                    correct: *correct,
+                    grade: if *correct { Rating::Good } else { Rating::Again },
+                    puzzle_rating: 1150,
+                })
+                .unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn a_theme_that_keeps_going_wrong_is_named() {
+        let attempts: Vec<(&str, bool)> = (0..12).map(|i| ("p1", i % 4 == 0)).collect();
+        let store = store_with(&[("p1", "fork")], &attempts);
+        let weak = recurring_weaknesses(&store).unwrap();
+        assert_eq!(weak.len(), 1);
+        assert_eq!(weak[0].theme, "fork");
+        assert!(weak[0].success < WEAK_BELOW);
+        assert_eq!(weak[0].attempts, 12);
+    }
+
+    #[test]
+    fn a_theme_going_well_is_not_called_a_weakness() {
+        let attempts: Vec<(&str, bool)> = (0..12).map(|_| ("p1", true)).collect();
+        let store = store_with(&[("p1", "pin")], &attempts);
+        assert!(recurring_weaknesses(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn too_few_attempts_is_not_evidence_of_anything() {
+        let attempts: Vec<(&str, bool)> = (0..(MIN_THEME_ATTEMPTS as usize - 1))
+            .map(|_| ("p1", false))
+            .collect();
+        let store = store_with(&[("p1", "skewer")], &attempts);
+        assert!(
+            recurring_weaknesses(&store).unwrap().is_empty(),
+            "a short bad run is not a weakness"
+        );
+    }
+
+    #[test]
+    fn the_worst_theme_comes_first() {
+        let mut attempts: Vec<(&str, bool)> = (0..12).map(|i| ("bad", i % 6 == 0)).collect();
+        attempts.extend((0..12).map(|i| ("mid", i % 2 == 0)));
+        let store = store_with(&[("bad", "fork"), ("mid", "pin")], &attempts);
+        let weak = recurring_weaknesses(&store).unwrap();
+        assert_eq!(weak.first().map(|w| w.theme.as_str()), Some("fork"));
+    }
+}

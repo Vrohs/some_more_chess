@@ -19,6 +19,12 @@ pub enum Limit {
     Depth(u32),
     Nodes(u64),
     Movetime(Duration),
+    /// Search to a depth but give up after a time, whichever comes first.
+    ///
+    /// Depth alone is unbounded in practice: most positions reach a given depth
+    /// quickly and a few take many times longer, which is enough to make an
+    /// interface feel stuck.
+    DepthOrTime { depth: u32, millis: u64 },
 }
 
 impl Limit {
@@ -27,6 +33,7 @@ impl Limit {
             Limit::Depth(d) => format!("depth {d}"),
             Limit::Nodes(n) => format!("nodes {n}"),
             Limit::Movetime(t) => format!("movetime {}", t.as_millis()),
+            Limit::DepthOrTime { depth, millis } => format!("depth {depth} movetime {millis}"),
         }
     }
 }
@@ -347,6 +354,15 @@ mod tests {
         assert_eq!(
             Limit::Movetime(Duration::from_millis(250)).to_go_args(),
             "movetime 250"
+        );
+        assert_eq!(
+            Limit::DepthOrTime {
+                depth: 22,
+                millis: 3000
+            }
+            .to_go_args(),
+            "depth 22 movetime 3000",
+            "both bounds are sent so whichever comes first wins"
         );
     }
 }

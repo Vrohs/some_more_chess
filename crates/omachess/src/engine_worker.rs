@@ -53,6 +53,10 @@ pub enum Reply {
 /// capped rating, short enough that the game does not drag.
 const MOVE_TIME: Duration = Duration::from_millis(400);
 
+/// Longest a study evaluation may take. Deep analysis is worth waiting a moment
+/// for; it is not worth a position that never comes back.
+const STUDY_TIME_CAP_MS: u64 = 2500;
+
 pub struct EngineWorker {
     requests: Sender<Request>,
     replies: Receiver<Reply>,
@@ -146,7 +150,14 @@ impl EngineWorker {
                                 }
                             }
                         }
-                        match active.analyse(&fen, &moves, Limit::Depth(depth)) {
+                        match active.analyse(
+                            &fen,
+                            &moves,
+                            Limit::DepthOrTime {
+                                depth,
+                                millis: STUDY_TIME_CAP_MS,
+                            },
+                        ) {
                             Ok(analysis) => Reply::Evaluation { analysis, token },
                             Err(e) => {
                                 engine = None;

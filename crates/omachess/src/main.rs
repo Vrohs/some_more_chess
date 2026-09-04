@@ -135,6 +135,19 @@ fn command_progress() -> anyhow::Result<()> {
     );
     println!("solved     {} distinct puzzles", store.solved_count()?);
 
+    let weak = omachess_core::progress::recurring_weaknesses(&store)?;
+    if !weak.is_empty() {
+        println!("\n-- what keeps costing you --");
+        for w in &weak {
+            println!(
+                "  {:<18} {:>3.0}% solved over {} attempts",
+                w.theme,
+                w.success * 100.0,
+                w.attempts
+            );
+        }
+    }
+
     println!("\n-- unseen puzzles (does this mean better at chess?) --");
     let transfer = transfer_by_band(&store)?;
     if transfer.is_empty() {
