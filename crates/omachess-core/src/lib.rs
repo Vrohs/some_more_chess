@@ -12,6 +12,7 @@ pub mod grade;
 pub mod ingest;
 pub mod openings;
 pub mod paths;
+pub mod pgn;
 pub mod progress;
 pub mod puzzle;
 pub mod review;

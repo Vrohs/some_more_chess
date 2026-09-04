@@ -255,6 +255,22 @@ pub trait Evaluator {
     fn eval(&mut self, fen: &str, moves: &[String]) -> Result<Analysis>;
 }
 
+/// An engine held to a fixed search depth.
+///
+/// Bulk import analyses thousands of positions, where the default depth would
+/// take hours. A shallower search is less certain about close calls but finds
+/// the same blunders, which is what the import is for.
+pub struct AtDepth<'a> {
+    pub engine: &'a mut Engine,
+    pub depth: u32,
+}
+
+impl Evaluator for AtDepth<'_> {
+    fn eval(&mut self, fen: &str, moves: &[String]) -> Result<Analysis> {
+        self.engine.analyse(fen, moves, Limit::Depth(self.depth))
+    }
+}
+
 impl Evaluator for Engine {
     fn eval(&mut self, fen: &str, moves: &[String]) -> Result<Analysis> {
         self.analyse(fen, moves, Limit::Depth(16))

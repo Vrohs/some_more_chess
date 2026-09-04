@@ -10,6 +10,7 @@ chrono.workspace = true
 rusqlite.workspace = true
 rs-fsrs.workspace = true
 shakmaty.workspace = true
+pgn-reader.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 csv = "1.4"

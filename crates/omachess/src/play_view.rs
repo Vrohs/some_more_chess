@@ -873,6 +873,7 @@ impl PlayView {
             blunders: counts.blunders as u32,
             mistakes: counts.mistakes as u32,
             inaccuracies: counts.inaccuracies as u32,
+            source: String::new(),
         };
         let _ = self.store.borrow().record_game(&record);
     }

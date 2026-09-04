@@ -147,6 +147,9 @@ pub struct GameRecord {
     pub blunders: u32,
     pub mistakes: u32,
     pub inaccuracies: u32,
+    /// Where the game came from, for imported games. Empty for games played
+    /// in the application.
+    pub source: String,
 }
 
 /// A recorded solve, as stored.
@@ -200,7 +203,11 @@ impl Store {
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as u32;
 
         // Steps are appended here and never renumbered or edited once shipped.
-        let steps: [&str; 0] = [];
+        let steps: [&str; 1] = [
+            // Imported games need an identity of their own so a re-import does
+            // not duplicate them; games played in the app leave it empty.
+            "ALTER TABLE games ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+        ];
 
         for (index, sql) in steps.iter().enumerate() {
             let step = index as u32 + 1;
@@ -617,8 +624,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO games
              (played_at, player_white, opponent_elo, result, moves, accuracy,
-              mean_loss, blunders, mistakes, inaccuracies)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              mean_loss, blunders, mistakes, inaccuracies, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 game.played_at,
                 game.player_white as i64,
@@ -630,16 +637,29 @@ impl Store {
                 game.blunders,
                 game.mistakes,
                 game.inaccuracies,
+                game.source,
             ],
         )?;
         Ok(())
+    }
+
+    /// Whether a game from this source is already stored.
+    pub fn has_game_source(&self, source: &str) -> Result<bool> {
+        if source.is_empty() {
+            return Ok(false);
+        }
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM games WHERE source = ?1",
+            params![source],
+            |r| r.get::<_, i64>(0),
+        )? > 0)
     }
 
     /// Games oldest first, which is the order a trend is read in.
     pub fn games(&self) -> Result<Vec<GameRecord>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT played_at, player_white, opponent_elo, result, moves, accuracy,
-                    mean_loss, blunders, mistakes, inaccuracies
+                    mean_loss, blunders, mistakes, inaccuracies, source
              FROM games ORDER BY played_at ASC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -654,6 +674,7 @@ impl Store {
                 blunders: r.get(7)?,
                 mistakes: r.get(8)?,
                 inaccuracies: r.get(9)?,
+                source: r.get(10)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)

@@ -395,6 +395,7 @@ mod game_tests {
             blunders,
             mistakes: 0,
             inaccuracies: 0,
+            source: String::new(),
         }
     }
 

@@ -59,6 +59,10 @@ pub struct GameRow {
     pub blunders: u32,
     pub mistakes: u32,
     pub inaccuracies: u32,
+    /// Older backups predate imported games, so this defaults rather than
+    /// failing to load.
+    #[serde(default)]
+    pub source: String,
 }
 
 /// What a restore actually changed.
@@ -93,6 +97,7 @@ pub fn export(store: &Store) -> Result<String> {
                 blunders: g.blunders,
                 mistakes: g.mistakes,
                 inaccuracies: g.inaccuracies,
+                source: g.source,
             })
             .collect(),
         settings: store.export_settings()?,
@@ -153,6 +158,7 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
             blunders: game.blunders,
             mistakes: game.mistakes,
             inaccuracies: game.inaccuracies,
+            source: game.source.clone(),
         })?;
         report.games_added += 1;
     }
@@ -179,7 +185,7 @@ mod tests {
     use chrono::{Duration, TimeZone};
 
     fn populated() -> Store {
-        let mut store = Store::in_memory().unwrap();
+        let store = Store::in_memory().unwrap();
         let base = Utc.with_ymd_and_hms(2026, 2, 1, 10, 0, 0).unwrap();
         for i in 0..5 {
             store
@@ -207,6 +213,7 @@ mod tests {
                 blunders: 2,
                 mistakes: 1,
                 inaccuracies: 3,
+                source: String::new(),
             })
             .unwrap();
         let card = rs_fsrs::Card::new();

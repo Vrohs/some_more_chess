@@ -35,6 +35,7 @@ fn main() -> ExitCode {
         Some("games") => command_games(),
         Some("export") => command_export(args.get(1).map(PathBuf::from)),
         Some("restore") => command_restore(args.get(1).map(PathBuf::from)),
+        Some("import-pgn") => command_import_pgn(args.get(1).map(PathBuf::from), args.get(2)),
         Some("--help" | "-h") => {
             print_usage();
             Ok(())
@@ -63,6 +64,9 @@ USAGE:
     omachess games           Show how well you have been playing the engine
     omachess export <FILE>   Write your history to a file you can keep
     omachess restore <FILE>  Merge a history file back in
+    omachess import-pgn <FILE> [NAME]
+                             Analyse your own games from a PGN export. NAME is
+                             your username in the file; it is remembered.
 
 The puzzle export is CC0 and lives at
     {}
@@ -288,6 +292,116 @@ fn command_restore(path: Option<PathBuf>) -> anyhow::Result<()> {
         report.settings_written,
     );
     Ok(())
+}
+
+/// Search depth for bulk import. Deep enough to find blunders, shallow enough
+/// that a few hundred games finish in minutes rather than hours.
+const IMPORT_DEPTH: u32 = 12;
+
+fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::Result<()> {
+    use omachess_core::engine::{find_engine, Engine};
+    use omachess_core::review::{analyse_game, AtDepth};
+    use omachess_core::store::GameRecord;
+
+    let Some(path) = path else {
+        anyhow::bail!("usage: omachess import-pgn <file.pgn> [your name in the file]");
+    };
+    let store = open_store()?;
+
+    // The name is remembered, so this is only needed once.
+    let player = match name {
+        Some(name) => {
+            store.set_setting("player_name", name)?;
+            name.clone()
+        }
+        None => store.setting("player_name")?.ok_or_else(|| {
+            anyhow::anyhow!("no name remembered yet: omachess import-pgn <file.pgn> <your name>")
+        })?,
+    };
+
+    let Some(engine_path) = find_engine() else {
+        anyhow::bail!("no engine on PATH; install stockfish to analyse games");
+    };
+    let mut engine = Engine::spawn(&engine_path)?;
+    engine.limit_strength(None)?;
+
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let games = omachess_core::pgn::read_all(&bytes)?;
+    let mine: Vec<_> = games
+        .iter()
+        .filter_map(|g| g.side_of(&player).map(|side| (g, side)))
+        .collect();
+
+    println!(
+        "{} games in the file, {} played by {player}.",
+        games.len(),
+        mine.len()
+    );
+    if mine.is_empty() {
+        println!("Check the name matches the White or Black tag exactly.");
+        return Ok(());
+    }
+
+    let (mut imported, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+    for (index, (game, side)) in mine.iter().enumerate() {
+        let source = game.site.clone().unwrap_or_default();
+        if store.has_game_source(&source)? {
+            skipped += 1;
+            continue;
+        }
+        print!("\r  analysing {} of {}…", index + 1, mine.len());
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        let mut evaluator = AtDepth {
+            engine: &mut engine,
+            depth: IMPORT_DEPTH,
+        };
+        let analysis = match analyse_game(
+            &mut evaluator,
+            omachess_core::game::START_FEN,
+            &game.moves,
+            *side,
+        ) {
+            Ok(analysis) if !analysis.is_empty() => analysis,
+            _ => {
+                failed += 1;
+                continue;
+            }
+        };
+
+        let counts = analysis.counts();
+        store.record_game(&GameRecord {
+            played_at: parse_date(game.date.as_deref())
+                .unwrap_or_else(chrono::Utc::now),
+            player_white: *side == shakmaty::Color::White,
+            opponent_elo: 0,
+            result: game.outcome_for(*side).to_owned(),
+            moves: analysis.moves.len() as u32,
+            accuracy: analysis.accuracy(),
+            mean_loss: analysis.mean_loss(),
+            blunders: counts.blunders as u32,
+            mistakes: counts.mistakes as u32,
+            inaccuracies: counts.inaccuracies as u32,
+            source,
+        })?;
+        imported += 1;
+    }
+    println!(
+        "\rimported {imported}, already present {skipped}, unreadable {failed}          "
+    );
+    println!("Run `omachess games` to see the trend.");
+    Ok(())
+}
+
+/// PGN dates are `YYYY.MM.DD`; anything else is left to the caller.
+fn parse_date(date: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeZone;
+    let date = date?;
+    let mut parts = date.split(['.', '-', '/']);
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    chrono::Utc.with_ymd_and_hms(year, month, day, 12, 0, 0).single()
 }
 
 fn run_app() -> anyhow::Result<()> {
