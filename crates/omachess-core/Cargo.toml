@@ -1,0 +1,17 @@
+[package]
+name = "omachess-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+rs-fsrs.workspace = true
+shakmaty.workspace = true
+csv = "1.4"
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"

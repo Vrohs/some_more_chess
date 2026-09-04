@@ -1,0 +1,585 @@
+//! The chess board.
+//!
+//! Squares are ordinary widgets carrying CSS classes rather than a cairo
+//! drawing, which keeps the layout and the styling in one place. Piece art is
+//! drawn from a piece set when one is installed, and from Unicode glyphs
+//! otherwise.
+
+use std::cell::{Cell, RefCell};
+use std::rc::{Rc, Weak};
+
+use gtk4::prelude::*;
+use gtk4::{Align, Box as GtkBox, Fixed, GestureDrag, Grid, Label, Orientation, Overlay, Picture};
+use shakmaty::{Chess, Color, Position, Role, Square};
+
+use crate::pieces::PieceSet;
+
+type SquareHandler = Box<dyn Fn(Square)>;
+type DragHandler = Box<dyn Fn(Square, Square)>;
+
+/// However a piece is drawn, it is held directly rather than found by walking
+/// the widget tree on every redraw.
+enum PieceWidget {
+    Art(Picture),
+    Glyph(Label),
+}
+
+struct SquareWidgets {
+    cell: GtkBox,
+    piece: PieceWidget,
+    /// Rank digit, shown only while this square sits in the leftmost column.
+    rank: Label,
+    /// File letter, shown only while this square sits in the bottom row.
+    file: Label,
+}
+
+pub struct BoardView {
+    /// The grid, plus the piece that follows the cursor while dragging.
+    root: Overlay,
+    /// The dragged piece lives in a `Fixed` so it is positioned by coordinates
+    /// rather than margins, and the overlay is told not to measure it. Between
+    /// them that guarantees dragging cannot change the board's layout — if it
+    /// did, the board would resize under the pointer mid-drag and the square
+    /// released on would not be the square under the cursor.
+    ghost_layer: Fixed,
+    ghost: Picture,
+    grid: Grid,
+    squares: Vec<SquareWidgets>,
+    handler: RefCell<Option<SquareHandler>>,
+    drag_handler: RefCell<Option<DragHandler>>,
+    selected: RefCell<Option<Square>>,
+    /// The move just played, highlighted so the reply is easy to see.
+    last_move: RefCell<Option<(Square, Square)>>,
+    /// The king square to mark when the side to move is in check.
+    check: RefCell<Option<Square>>,
+    /// The mated king, if the game ended that way.
+    mate: RefCell<Option<Square>>,
+    /// Which side is at the bottom of the board.
+    orientation: RefCell<Color>,
+    /// Square the pointer went down on, used to tell a drag from a click.
+    press_origin: Cell<Option<Square>>,
+    /// Where the press began, in grid coordinates.
+    press_point: Cell<(f64, f64)>,
+    /// Edge length of the carried piece, in pixels.
+    ghost_size: Cell<i32>,
+    /// When absent the board falls back to Unicode glyphs.
+    pieces: Option<Rc<PieceSet>>,
+}
+
+impl BoardView {
+    pub fn new(pieces: Option<Rc<PieceSet>>) -> Rc<Self> {
+        let grid = Grid::builder()
+            .row_homogeneous(true)
+            .column_homogeneous(true)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        grid.add_css_class("omachess-board");
+
+        let mut squares = Vec::with_capacity(64);
+        for index in 0..64u32 {
+            let square = Square::new(index);
+            let light = square_is_light(square);
+
+            // A plain box rather than a button: a button installs its own
+            // click gesture, which competes with the grid-level one and makes
+            // press-and-drag impossible to detect reliably.
+            let cell = GtkBox::builder()
+                .orientation(Orientation::Vertical)
+                .build();
+            cell.add_css_class("omachess-square");
+            cell.add_css_class(if light { "light" } else { "dark" });
+
+            let piece = match pieces {
+                Some(_) => {
+                    let picture = Picture::builder()
+                        .halign(Align::Fill)
+                        .valign(Align::Fill)
+                        .can_shrink(true)
+                        .build();
+                    picture.add_css_class("omachess-piece");
+                    PieceWidget::Art(picture)
+                }
+                None => {
+                    let label = Label::builder()
+                        .halign(Align::Center)
+                        .valign(Align::Center)
+                        .build();
+                    label.add_css_class("omachess-piece");
+                    PieceWidget::Glyph(label)
+                }
+            };
+
+            let rank = coordinate_label(
+                &square.rank().char().to_string(),
+                Align::Start,
+                Align::Start,
+                light,
+            );
+            let file = coordinate_label(
+                &square.file().char().to_string(),
+                Align::End,
+                Align::End,
+                light,
+            );
+
+            let overlay = Overlay::new();
+            match &piece {
+                PieceWidget::Art(picture) => overlay.set_child(Some(picture)),
+                PieceWidget::Glyph(label) => overlay.set_child(Some(label)),
+            }
+            overlay.add_overlay(&rank);
+            overlay.add_overlay(&file);
+            overlay.set_hexpand(true);
+            overlay.set_vexpand(true);
+            cell.append(&overlay);
+
+            let (column, row) = grid_position(square, Color::White);
+            grid.attach(&cell, column, row, 1, 1);
+
+            squares.push(SquareWidgets {
+                cell,
+                piece,
+                rank,
+                file,
+            });
+        }
+
+        // The dragged piece is drawn above the board and follows the pointer,
+        // which is what makes dragging feel like moving a piece rather than
+        // issuing a command.
+        let ghost = Picture::builder()
+            .can_shrink(true)
+            .visible(false)
+            .can_target(false)
+            .build();
+        ghost.add_css_class("omachess-piece");
+        ghost.add_css_class("omachess-ghost");
+
+        let ghost_layer = Fixed::builder().can_target(false).build();
+        ghost_layer.put(&ghost, 0.0, 0.0);
+
+        let root = Overlay::builder().child(&grid).build();
+        root.add_overlay(&ghost_layer);
+        root.set_measure_overlay(&ghost_layer, false);
+
+        let view = Rc::new(Self {
+            root,
+            ghost_layer,
+            ghost,
+            grid,
+            squares,
+            handler: RefCell::new(None),
+            drag_handler: RefCell::new(None),
+            selected: RefCell::new(None),
+            last_move: RefCell::new(None),
+            check: RefCell::new(None),
+            mate: RefCell::new(None),
+            orientation: RefCell::new(Color::White),
+            press_origin: Cell::new(None),
+            press_point: Cell::new((0.0, 0.0)),
+            ghost_size: Cell::new(0),
+            pieces,
+        });
+        view.apply_coordinates(Color::White);
+
+        // A single drag gesture covers both styles: releasing on the square you
+        // pressed is a click, releasing elsewhere is a drag. Two gestures would
+        // fight over the same event sequence.
+        let drag = GestureDrag::new();
+
+        let weak: Weak<Self> = Rc::downgrade(&view);
+        drag.connect_drag_begin(move |_, x, y| {
+            if let Some(view) = weak.upgrade() {
+                view.begin_drag(x, y);
+            }
+        });
+
+        let weak: Weak<Self> = Rc::downgrade(&view);
+        drag.connect_drag_update(move |_, dx, dy| {
+            if let Some(view) = weak.upgrade() {
+                view.update_drag(dx, dy);
+            }
+        });
+
+        let weak: Weak<Self> = Rc::downgrade(&view);
+        drag.connect_drag_end(move |_, dx, dy| {
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            let from = view.press_origin.take();
+            view.end_drag();
+
+            let (sx, sy) = view.press_point.get();
+            let to = view.square_at_point(sx + dx, sy + dy);
+            match (from, to) {
+                (Some(from), Some(to)) if from != to => view.on_drag(from, to),
+                (_, Some(to)) => view.on_click(to),
+                _ => {}
+            }
+        });
+        view.grid.add_controller(drag);
+
+        view
+    }
+
+    pub fn widget(&self) -> &Overlay {
+        &self.root
+    }
+
+    /// Put `side` at the bottom of the board.
+    ///
+    /// A solver reads far more slowly from the wrong side, so a puzzle where
+    /// Black is to move must be shown from Black's point of view — otherwise
+    /// the recorded solve time measures disorientation rather than chess.
+    pub fn set_orientation(&self, side: Color) {
+        if self.orientation.replace(side) == side {
+            return;
+        }
+        for index in 0..64u32 {
+            let square = Square::new(index);
+            let cell = &self.squares[index as usize].cell;
+            let (column, row) = grid_position(square, side);
+            self.grid.remove(cell);
+            self.grid.attach(cell, column, row, 1, 1);
+        }
+        self.apply_coordinates(side);
+    }
+
+    /// Show each coordinate only on the edge it labels, for this orientation.
+    fn apply_coordinates(&self, side: Color) {
+        for index in 0..64u32 {
+            let square = Square::new(index);
+            let (column, row) = grid_position(square, side);
+            let widgets = &self.squares[index as usize];
+            widgets.rank.set_visible(column == 0);
+            widgets.file.set_visible(row == 7);
+        }
+    }
+
+    /// Called with each square the user activates.
+    pub fn connect_move(self: &Rc<Self>, handler: impl Fn(Square) + 'static) {
+        *self.handler.borrow_mut() = Some(Box::new(handler));
+    }
+
+    fn on_click(&self, square: Square) {
+        if let Some(handler) = self.handler.borrow().as_ref() {
+            handler(square);
+        }
+    }
+
+    /// Which square lies under a point in grid coordinates.
+    ///
+    /// Hit-testing by picking the widget is exact, where dividing the grid
+    /// width by eight would drift with padding and border widths.
+    fn square_at_point(&self, x: f64, y: f64) -> Option<Square> {
+        let mut widget = self.grid.pick(x, y, gtk4::PickFlags::DEFAULT)?;
+        loop {
+            if let Some(index) = self
+                .squares
+                .iter()
+                .position(|s| s.cell.upcast_ref::<gtk4::Widget>() == &widget)
+            {
+                return Some(Square::new(index as u32));
+            }
+            widget = widget.parent()?;
+        }
+    }
+
+    /// Pick a piece up: mark the square, lift its image onto the ghost, and
+    /// leave the square looking empty until the drag finishes.
+    fn begin_drag(&self, x: f64, y: f64) {
+        self.press_point.set((x, y));
+        let Some(square) = self.square_at_point(x, y) else {
+            self.press_origin.set(None);
+            return;
+        };
+        self.press_origin.set(Some(square));
+        self.squares[square as usize].cell.add_css_class("pressed");
+
+        if let PieceWidget::Art(picture) = &self.squares[square as usize].piece {
+            let Some(paintable) = picture.paintable() else {
+                return;
+            };
+            // Exactly one square, so the piece is the same size in the hand as
+            // it was on the board.
+            let size = picture.width().min(picture.height());
+            if size <= 0 {
+                return;
+            }
+            self.ghost.set_paintable(Some(&paintable));
+            self.ghost.set_size_request(size, size);
+            self.ghost_size.set(size);
+            picture.set_opacity(0.25);
+            self.place_ghost(x, y);
+            self.ghost.set_visible(true);
+        }
+    }
+
+    fn update_drag(&self, dx: f64, dy: f64) {
+        if !self.ghost.is_visible() {
+            return;
+        }
+        let (sx, sy) = self.press_point.get();
+        self.place_ghost(sx + dx, sy + dy);
+    }
+
+    /// Put the dragged piece down and restore the board's own rendering.
+    fn end_drag(&self) {
+        self.ghost.set_visible(false);
+        for square in &self.squares {
+            square.cell.remove_css_class("pressed");
+            if let PieceWidget::Art(picture) = &square.piece {
+                picture.set_opacity(1.0);
+            }
+        }
+    }
+
+    /// Centre the carried piece on the pointer.
+    fn place_ghost(&self, x: f64, y: f64) {
+        let size = f64::from(self.ghost_size.get().max(1));
+        self.ghost_layer
+            .move_(&self.ghost, x - size / 2.0, y - size / 2.0);
+    }
+
+    /// A piece dragged from one square to another.
+    pub fn connect_drag(self: &Rc<Self>, handler: impl Fn(Square, Square) + 'static) {
+        *self.drag_handler.borrow_mut() = Some(Box::new(handler));
+    }
+
+    fn on_drag(&self, from: Square, to: Square) {
+        if let Some(handler) = self.drag_handler.borrow().as_ref() {
+            handler(from, to);
+        }
+    }
+
+    /// Draw a position.
+    pub fn set_position(&self, position: &Chess) {
+        let board = position.board();
+        for index in 0..64u32 {
+            let square = Square::new(index);
+            let piece = board.piece_at(square);
+
+            match (&self.squares[index as usize].piece, &self.pieces) {
+                (PieceWidget::Art(picture), Some(set)) => match piece {
+                    Some(piece) => picture.set_paintable(set.texture(piece.color, piece.role)),
+                    None => picture.set_paintable(gtk4::gdk::Paintable::NONE),
+                },
+                (PieceWidget::Glyph(label), _) => match piece {
+                    Some(piece) => {
+                        label.set_text(&glyph(piece.role).to_string());
+                        let (add, remove) = match piece.color {
+                            Color::White => ("white-piece", "black-piece"),
+                            Color::Black => ("black-piece", "white-piece"),
+                        };
+                        label.remove_css_class(remove);
+                        label.add_css_class(add);
+                    }
+                    None => {
+                        label.set_text("");
+                        label.remove_css_class("white-piece");
+                        label.remove_css_class("black-piece");
+                    }
+                },
+                (PieceWidget::Art(_), None) => {}
+            }
+        }
+    }
+
+    /// Empty every square. Used to withhold a puzzle until the solver is ready,
+    /// so the clock and the position start together.
+    pub fn clear(&self) {
+        for index in 0..64u32 {
+            match &self.squares[index as usize].piece {
+                PieceWidget::Art(picture) => picture.set_paintable(gtk4::gdk::Paintable::NONE),
+                PieceWidget::Glyph(label) => {
+                    label.set_text("");
+                    label.remove_css_class("white-piece");
+                    label.remove_css_class("black-piece");
+                }
+            }
+        }
+    }
+
+    pub fn selected(&self) -> Option<Square> {
+        *self.selected.borrow()
+    }
+
+    /// Mark a square as the origin of a move in progress.
+    pub fn select(&self, square: Option<Square>) {
+        if let Some(previous) = self.selected.replace(square) {
+            self.squares[previous as usize].cell.remove_css_class("selected");
+        }
+        if let Some(square) = square {
+            self.squares[square as usize].cell.add_css_class("selected");
+        }
+    }
+
+    /// Highlight the move just played.
+    pub fn set_last_move(&self, mv: Option<(Square, Square)>) {
+        if let Some((from, to)) = self.last_move.replace(mv) {
+            self.squares[from as usize].cell.remove_css_class("last-move");
+            self.squares[to as usize].cell.remove_css_class("last-move");
+        }
+        if let Some((from, to)) = mv {
+            self.squares[from as usize].cell.add_css_class("last-move");
+            self.squares[to as usize].cell.add_css_class("last-move");
+        }
+    }
+
+    /// Mark a king as mated — deliberately louder than check, because the game
+    /// being over is the single most important thing the board can say.
+    pub fn set_mate(&self, square: Option<Square>) {
+        if let Some(previous) = self.mate.replace(square) {
+            self.squares[previous as usize].cell.remove_css_class("mated");
+        }
+        if let Some(square) = square {
+            self.squares[square as usize].cell.add_css_class("mated");
+        }
+    }
+
+    /// Mark a king in check.
+    pub fn set_check(&self, square: Option<Square>) {
+        if let Some(previous) = self.check.replace(square) {
+            self.squares[previous as usize].cell.remove_css_class("in-check");
+        }
+        if let Some(square) = square {
+            self.squares[square as usize].cell.add_css_class("in-check");
+        }
+    }
+
+    /// Flash the board to show a rejected move.
+    pub fn set_wrong(&self, wrong: bool) {
+        if wrong {
+            self.grid.add_css_class("wrong");
+        } else {
+            self.grid.remove_css_class("wrong");
+        }
+    }
+}
+
+fn coordinate_label(text: &str, halign: Align, valign: Align, on_light: bool) -> Label {
+    let label = Label::builder()
+        .label(text)
+        .halign(halign)
+        .valign(valign)
+        .margin_start(3)
+        .margin_end(3)
+        .margin_top(1)
+        .margin_bottom(1)
+        .build();
+    label.add_css_class("omachess-coord");
+    // Coordinates sit on the square they label, so they take their contrast
+    // from that square rather than from the board as a whole.
+    label.add_css_class(if on_light { "on-light" } else { "on-dark" });
+    label
+}
+
+/// Where a square sits in the grid for a given orientation.
+fn grid_position(square: Square, orientation: Color) -> (i32, i32) {
+    let file = i32::from(square.file().char() as u8 - b'a');
+    let rank = i32::from(square.rank().char() as u8 - b'1');
+    match orientation {
+        // White at the bottom: rank 8 on top, file a on the left.
+        Color::White => (file, 7 - rank),
+        Color::Black => (7 - file, rank),
+    }
+}
+
+fn square_is_light(square: Square) -> bool {
+    let file = square.file().char() as u8 - b'a';
+    let rank = square.rank().char() as u8 - b'1';
+    (file + rank) % 2 == 1
+}
+
+/// Solid Unicode chess glyphs for both sides, used when no piece set is
+/// installed. Colouring one glyph set per side renders more evenly than mixing
+/// the outline and solid ranges, which many fonts draw at different weights.
+fn glyph(role: Role) -> char {
+    match role {
+        Role::King => '\u{265A}',
+        Role::Queen => '\u{265B}',
+        Role::Rook => '\u{265C}',
+        Role::Bishop => '\u{265D}',
+        Role::Knight => '\u{265E}',
+        Role::Pawn => '\u{265F}',
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a1_is_dark_and_h1_is_light() {
+        // The near-right corner is light on every real board.
+        assert!(!square_is_light(Square::A1));
+        assert!(square_is_light(Square::H1));
+        assert!(square_is_light(Square::A8));
+        assert!(!square_is_light(Square::H8));
+    }
+
+    #[test]
+    fn white_orientation_puts_a1_bottom_left() {
+        assert_eq!(grid_position(Square::A1, Color::White), (0, 7));
+        assert_eq!(grid_position(Square::H8, Color::White), (7, 0));
+    }
+
+    #[test]
+    fn flipping_mirrors_the_board_in_both_axes() {
+        assert_eq!(grid_position(Square::A1, Color::Black), (7, 0));
+        assert_eq!(grid_position(Square::H8, Color::Black), (0, 7));
+    }
+
+    /// Flipping moves widgets but must never disturb the checker pattern: the
+    /// square colour classes are fixed at construction, so a bug in
+    /// `grid_position` would show up as two same-coloured cells side by side.
+    #[test]
+    fn the_checker_pattern_survives_flipping() {
+        for orientation in [Color::White, Color::Black] {
+            let mut cells = std::collections::HashMap::new();
+            for index in 0..64u32 {
+                let square = Square::new(index);
+                cells.insert(grid_position(square, orientation), square_is_light(square));
+            }
+            assert_eq!(cells.len(), 64, "{orientation:?}: squares collided");
+
+            for row in 0..8 {
+                for col in 0..7 {
+                    assert_ne!(
+                        cells[&(col, row)],
+                        cells[&(col + 1, row)],
+                        "{orientation:?}: ({col},{row}) and ({},{row}) share a colour",
+                        col + 1
+                    );
+                }
+            }
+            assert!(
+                cells[&(7, 7)],
+                "{orientation:?}: near-right corner must be light"
+            );
+        }
+    }
+
+    #[test]
+    fn coordinates_label_one_full_edge_each() {
+        for orientation in [Color::White, Color::Black] {
+            let mut ranks = Vec::new();
+            let mut files = Vec::new();
+            for index in 0..64u32 {
+                let square = Square::new(index);
+                let (column, row) = grid_position(square, orientation);
+                if column == 0 {
+                    ranks.push(square.rank().char());
+                }
+                if row == 7 {
+                    files.push(square.file().char());
+                }
+            }
+            ranks.sort_unstable();
+            files.sort_unstable();
+            assert_eq!(ranks, vec!['1', '2', '3', '4', '5', '6', '7', '8']);
+            assert_eq!(files, vec!['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']);
+        }
+    }
+}

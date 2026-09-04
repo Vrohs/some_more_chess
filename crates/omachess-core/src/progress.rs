@@ -1,0 +1,641 @@
+//! Measuring whether the solver has actually improved.
+//!
+//! The only defensible comparison is a puzzle against itself. Comparing early
+//! solve times with later ones across *different* puzzles measures the puzzles
+//! as much as the person: a run of easy forks looks like progress and a run of
+//! hard endgames looks like decline.
+//!
+//! So every figure here is paired — each puzzle's most recent correct solve
+//! against its own first — and reported with the number of puzzles behind it
+//! and the probability of seeing that result by chance.
+
+use anyhow::Result;
+use chrono::Duration;
+
+use crate::store::{GameRecord, PairedSolve, Store};
+
+/// Repeated puzzles required before any claim is made at all.
+pub const MIN_PAIRS: usize = 5;
+
+/// A result worth acting on. Chosen as the conventional threshold rather than
+/// anything special about this domain.
+pub const SIGNIFICANT: f64 = 0.05;
+
+/// What the repeated puzzles actually show.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Improvement {
+    /// Puzzles solved correctly at least twice — the sample size.
+    pub puzzles: usize,
+    /// Median of each puzzle's first-solve ÷ latest-solve. Above one is faster.
+    pub median_speedup: f64,
+    pub faster: usize,
+    pub slower: usize,
+    pub unchanged: usize,
+    pub median_first: Duration,
+    pub median_latest: Duration,
+    /// One-sided sign-test probability of this many puzzles improving, or more,
+    /// if solve times were really unchanged. Small means the result is unlikely
+    /// to be noise.
+    pub p_value: f64,
+}
+
+impl Improvement {
+    pub fn is_significant(&self) -> bool {
+        self.p_value <= SIGNIFICANT
+    }
+}
+
+/// Improvement across every repeated puzzle, or `None` when too few have been
+/// repeated to say anything at all.
+pub fn measured_improvement(store: &Store) -> Result<Option<Improvement>> {
+    Ok(summarise(&store.paired_solves()?))
+}
+
+/// The same, split by rating band.
+pub fn improvement_by_band(store: &Store) -> Result<Vec<(u32, Improvement)>> {
+    let pairs = store.paired_solves()?;
+    let mut bands: Vec<u32> = pairs.iter().map(|p| p.band).collect();
+    bands.sort_unstable();
+    bands.dedup();
+
+    Ok(bands
+        .into_iter()
+        .filter_map(|band| {
+            let subset: Vec<PairedSolve> = pairs
+                .iter()
+                .filter(|p| p.band == band)
+                .cloned()
+                .collect();
+            summarise(&subset).map(|improvement| (band, improvement))
+        })
+        .collect())
+}
+
+fn summarise(pairs: &[PairedSolve]) -> Option<Improvement> {
+    if pairs.len() < MIN_PAIRS {
+        return None;
+    }
+
+    let mut speedups: Vec<f64> = pairs.iter().map(PairedSolve::speedup).collect();
+    speedups.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let faster = pairs.iter().filter(|p| p.latest < p.first).count();
+    let slower = pairs.iter().filter(|p| p.latest > p.first).count();
+    let unchanged = pairs.len() - faster - slower;
+
+    Some(Improvement {
+        puzzles: pairs.len(),
+        median_speedup: median_f64(&speedups),
+        faster,
+        slower,
+        unchanged,
+        median_first: median_duration(pairs.iter().map(|p| p.first)),
+        median_latest: median_duration(pairs.iter().map(|p| p.latest)),
+        // Ties carry no information about direction, so they are excluded from
+        // the test rather than counted as evidence either way.
+        p_value: sign_test(faster, faster + slower),
+    })
+}
+
+/// One-sided binomial sign test: the chance of `successes` or more out of
+/// `trials`, if each were a coin flip.
+///
+/// Computed in log space so large samples neither overflow nor underflow.
+pub fn sign_test(successes: usize, trials: usize) -> f64 {
+    if trials == 0 {
+        return 1.0;
+    }
+    if successes > trials {
+        return 0.0;
+    }
+    let n = trials as f64;
+    let log_half_pow = n * 0.5f64.ln();
+
+    let mut total = 0.0;
+    for k in successes..=trials {
+        total += (log_choose(trials, k) + log_half_pow).exp();
+    }
+    total.clamp(0.0, 1.0)
+}
+
+/// `ln(n choose k)`, accumulated as a product of ratios to stay in range.
+fn log_choose(n: usize, k: usize) -> f64 {
+    let k = k.min(n - k);
+    (1..=k).fold(0.0, |acc, j| {
+        acc + (((n - k + j) as f64) / (j as f64)).ln()
+    })
+}
+
+fn median_f64(sorted: &[f64]) -> f64 {
+    if sorted.is_empty() {
+        return 1.0;
+    }
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
+fn median_duration(values: impl Iterator<Item = Duration>) -> Duration {
+    let mut ms: Vec<i64> = values.map(|d| d.num_milliseconds()).collect();
+    ms.sort_unstable();
+    if ms.is_empty() {
+        return Duration::zero();
+    }
+    let mid = ms.len() / 2;
+    let value = if ms.len().is_multiple_of(2) {
+        (ms[mid - 1] + ms[mid]) / 2
+    } else {
+        ms[mid]
+    };
+    Duration::milliseconds(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pair(id: &str, first_s: i64, latest_s: i64) -> PairedSolve {
+        PairedSolve {
+            puzzle_id: id.into(),
+            band: 1100,
+            first: Duration::seconds(first_s),
+            latest: Duration::seconds(latest_s),
+            solves: 2,
+        }
+    }
+
+    #[test]
+    fn nothing_is_claimed_from_too_few_puzzles() {
+        let pairs: Vec<_> = (0..MIN_PAIRS - 1)
+            .map(|i| pair(&format!("p{i}"), 40, 10))
+            .collect();
+        assert!(summarise(&pairs).is_none(), "claimed a result from {} puzzles", pairs.len());
+    }
+
+    #[test]
+    fn consistent_speedups_are_detected_and_are_not_chance() {
+        let pairs: Vec<_> = (0..10).map(|i| pair(&format!("p{i}"), 40, 20)).collect();
+        let result = summarise(&pairs).expect("a result");
+        assert_eq!(result.puzzles, 10);
+        assert_eq!(result.faster, 10);
+        assert!((result.median_speedup - 2.0).abs() < 1e-9);
+        assert!(result.is_significant(), "p was {}", result.p_value);
+    }
+
+    #[test]
+    fn getting_slower_is_never_dressed_up_as_progress() {
+        let pairs: Vec<_> = (0..10).map(|i| pair(&format!("p{i}"), 20, 40)).collect();
+        let result = summarise(&pairs).expect("a result");
+        assert_eq!(result.faster, 0);
+        assert!(result.median_speedup < 1.0);
+        assert!(!result.is_significant(), "a decline must not read as significant");
+    }
+
+    #[test]
+    fn a_coin_flip_split_is_not_called_improvement() {
+        // Five faster, five slower: exactly what noise looks like.
+        let mut pairs: Vec<_> = (0..5).map(|i| pair(&format!("f{i}"), 30, 20)).collect();
+        pairs.extend((0..5).map(|i| pair(&format!("s{i}"), 20, 30)));
+        let result = summarise(&pairs).expect("a result");
+        assert_eq!((result.faster, result.slower), (5, 5));
+        assert!(
+            !result.is_significant(),
+            "an even split must not be significant, p was {}",
+            result.p_value
+        );
+    }
+
+    #[test]
+    fn one_lucky_puzzle_does_not_carry_the_result() {
+        // A single huge speedup among otherwise unchanged puzzles.
+        let mut pairs: Vec<_> = (0..9).map(|i| pair(&format!("p{i}"), 30, 30)).collect();
+        pairs.push(pair("lucky", 300, 3));
+        let result = summarise(&pairs).expect("a result");
+        assert!(
+            (result.median_speedup - 1.0).abs() < 1e-9,
+            "the median must ignore the outlier, got {}",
+            result.median_speedup
+        );
+        assert!(!result.is_significant());
+    }
+
+    #[test]
+    fn ties_are_excluded_from_the_test_rather_than_counted() {
+        let mut pairs: Vec<_> = (0..6).map(|i| pair(&format!("f{i}"), 30, 20)).collect();
+        pairs.extend((0..6).map(|i| pair(&format!("t{i}"), 25, 25)));
+        let result = summarise(&pairs).expect("a result");
+        assert_eq!(result.unchanged, 6);
+        // Six of six directional puzzles improved, so p = 0.5^6.
+        assert!((result.p_value - 0.5f64.powi(6)).abs() < 1e-9, "p was {}", result.p_value);
+    }
+
+    #[test]
+    fn the_sign_test_matches_known_values() {
+        assert!((sign_test(0, 0) - 1.0).abs() < 1e-12);
+        // All heads out of five: 1/32.
+        assert!((sign_test(5, 5) - 0.031_25).abs() < 1e-12);
+        // Every outcome is at least as extreme as zero successes.
+        assert!((sign_test(0, 5) - 1.0).abs() < 1e-12);
+        // Symmetry around the middle.
+        assert!((sign_test(3, 6) - 0.656_25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn large_samples_do_not_overflow() {
+        let p = sign_test(300, 500);
+        assert!(p.is_finite() && (0.0..=1.0).contains(&p), "p was {p}");
+        assert!(p < 0.001, "300 of 500 should be clearly significant, got {p}");
+    }
+}
+
+/// Games needed before any trend across games is reported. Each half must be
+/// large enough for the normal approximation below to mean anything.
+pub const MIN_GAMES: usize = 10;
+
+/// How play against the engine has changed, judged on quality rather than
+/// result.
+///
+/// Wins and losses depend on how hard the opponent was set; the win probability
+/// given away per move does not, and the opponent here is pinned near the
+/// player's own rating, which makes games comparable to each other.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayTrend {
+    pub games: usize,
+    pub earlier_accuracy: f64,
+    pub recent_accuracy: f64,
+    pub earlier_loss: f64,
+    pub recent_loss: f64,
+    pub earlier_blunders_per_100: f64,
+    pub recent_blunders_per_100: f64,
+    /// One-sided Mann-Whitney probability that the recent half is no better.
+    pub p_value: f64,
+}
+
+impl PlayTrend {
+    pub fn is_significant(&self) -> bool {
+        self.p_value <= SIGNIFICANT
+    }
+}
+
+/// Compare the most recent half of games against the earlier half.
+pub fn play_trend(store: &Store) -> Result<Option<PlayTrend>> {
+    Ok(summarise_games(&store.games()?))
+}
+
+fn summarise_games(games: &[GameRecord]) -> Option<PlayTrend> {
+    if games.len() < MIN_GAMES {
+        return None;
+    }
+    let split = games.len() / 2;
+    let (earlier, recent) = games.split_at(split);
+
+    let accuracy = |set: &[GameRecord]| -> Vec<f64> { set.iter().map(|g| g.accuracy).collect() };
+    let blunder_rate = |set: &[GameRecord]| -> f64 {
+        let moves: u32 = set.iter().map(|g| g.moves).sum();
+        if moves == 0 {
+            return 0.0;
+        }
+        let blunders: u32 = set.iter().map(|g| g.blunders).sum();
+        f64::from(blunders) * 100.0 / f64::from(moves)
+    };
+
+    let earlier_acc = accuracy(earlier);
+    let recent_acc = accuracy(recent);
+
+    Some(PlayTrend {
+        games: games.len(),
+        earlier_accuracy: median_of(&earlier_acc),
+        recent_accuracy: median_of(&recent_acc),
+        earlier_loss: median_of(&earlier.iter().map(|g| g.mean_loss).collect::<Vec<_>>()),
+        recent_loss: median_of(&recent.iter().map(|g| g.mean_loss).collect::<Vec<_>>()),
+        earlier_blunders_per_100: blunder_rate(earlier),
+        recent_blunders_per_100: blunder_rate(recent),
+        p_value: mann_whitney_greater(&recent_acc, &earlier_acc),
+    })
+}
+
+/// One-sided Mann-Whitney U test: the probability that `sample` is not drawn
+/// from a distribution shifted above `baseline`.
+///
+/// Uses the normal approximation with a continuity correction, which is why a
+/// minimum sample size is enforced before it is reported at all.
+pub fn mann_whitney_greater(sample: &[f64], baseline: &[f64]) -> f64 {
+    let (n1, n2) = (sample.len(), baseline.len());
+    if n1 == 0 || n2 == 0 {
+        return 1.0;
+    }
+    let mut u = 0.0;
+    for a in sample {
+        for b in baseline {
+            u += match a.partial_cmp(b) {
+                Some(std::cmp::Ordering::Greater) => 1.0,
+                Some(std::cmp::Ordering::Equal) => 0.5,
+                _ => 0.0,
+            };
+        }
+    }
+    let mean = (n1 * n2) as f64 / 2.0;
+    let sd = (((n1 * n2 * (n1 + n2 + 1)) as f64) / 12.0).sqrt();
+    if sd <= 0.0 {
+        return 1.0;
+    }
+    let z = (u - mean - 0.5) / sd;
+    1.0 - normal_cdf(z)
+}
+
+/// Standard normal CDF, via the Abramowitz and Stegun error-function
+/// approximation (accurate to about 1.5e-7).
+fn normal_cdf(z: f64) -> f64 {
+    0.5 * (1.0 + erf(z / std::f64::consts::SQRT_2))
+}
+
+fn erf(x: f64) -> f64 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let y = 1.0
+        - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
+            + 0.254_829_592)
+            * t
+            * (-x * x).exp();
+    sign * y
+}
+
+fn median_of(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    median_f64(&sorted)
+}
+
+#[cfg(test)]
+mod game_tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn game(index: i64, accuracy: f64, blunders: u32) -> GameRecord {
+        GameRecord {
+            played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap()
+                + chrono::Duration::days(index),
+            player_white: true,
+            opponent_elo: 1320,
+            result: "lost".into(),
+            moves: 40,
+            accuracy,
+            mean_loss: (100.0 - accuracy) / 1000.0,
+            blunders,
+            mistakes: 0,
+            inaccuracies: 0,
+        }
+    }
+
+    #[test]
+    fn nothing_is_claimed_from_too_few_games() {
+        let games: Vec<_> = (0..MIN_GAMES as i64 - 1).map(|i| game(i, 70.0, 1)).collect();
+        assert!(summarise_games(&games).is_none());
+    }
+
+    #[test]
+    fn steady_improvement_across_games_is_detected() {
+        let mut games: Vec<_> = (0..6).map(|i| game(i, 60.0 + i as f64, 3)).collect();
+        games.extend((6..12).map(|i| game(i, 85.0 + (i - 6) as f64, 0)));
+        let trend = summarise_games(&games).expect("a trend");
+        assert!(trend.recent_accuracy > trend.earlier_accuracy);
+        assert!(trend.recent_blunders_per_100 < trend.earlier_blunders_per_100);
+        assert!(trend.is_significant(), "p was {}", trend.p_value);
+    }
+
+    #[test]
+    fn noise_is_not_reported_as_improvement() {
+        // Alternating scores with no direction.
+        let games: Vec<_> = (0..12)
+            .map(|i| game(i, if i % 2 == 0 { 70.0 } else { 75.0 }, 1))
+            .collect();
+        let trend = summarise_games(&games).expect("a trend");
+        assert!(
+            !trend.is_significant(),
+            "alternating noise reported as progress, p = {}",
+            trend.p_value
+        );
+    }
+
+    #[test]
+    fn getting_worse_is_never_significant_improvement() {
+        let mut games: Vec<_> = (0..6).map(|i| game(i, 90.0, 0)).collect();
+        games.extend((6..12).map(|i| game(i, 55.0, 4)));
+        let trend = summarise_games(&games).expect("a trend");
+        assert!(trend.recent_accuracy < trend.earlier_accuracy);
+        assert!(!trend.is_significant());
+    }
+
+    #[test]
+    fn the_normal_cdf_matches_known_values() {
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-6);
+        assert!((normal_cdf(1.96) - 0.975).abs() < 1e-3);
+        assert!((normal_cdf(-1.96) - 0.025).abs() < 1e-3);
+    }
+
+    #[test]
+    fn identical_samples_are_not_a_difference() {
+        let a = vec![70.0, 72.0, 74.0, 76.0, 78.0];
+        assert!(mann_whitney_greater(&a, &a) > 0.3, "identical samples looked different");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Series for the charts.
+//
+// The shapes below are prepared here rather than in the view so that what the
+// charts claim can be tested. A chart that draws the wrong thing convincingly
+// is worse than no chart.
+// ---------------------------------------------------------------------------
+
+/// One repeated puzzle, as a line from its first solve to its latest.
+///
+/// This is the honest picture of improvement: every line that falls is a puzzle
+/// solved faster than the same person solved the same puzzle before.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlopePoint {
+    pub puzzle_id: String,
+    pub band: u32,
+    pub first_seconds: f64,
+    pub latest_seconds: f64,
+    pub solves: u32,
+}
+
+impl SlopePoint {
+    pub fn improved(&self) -> bool {
+        self.latest_seconds < self.first_seconds
+    }
+}
+
+/// Every puzzle solved correctly more than once, slowest first solve first.
+pub fn slope_points(store: &Store) -> Result<Vec<SlopePoint>> {
+    let mut points: Vec<SlopePoint> = store
+        .paired_solves()?
+        .into_iter()
+        .map(|p| SlopePoint {
+            puzzle_id: p.puzzle_id,
+            band: p.band,
+            first_seconds: p.first.num_milliseconds() as f64 / 1000.0,
+            latest_seconds: p.latest.num_milliseconds() as f64 / 1000.0,
+            solves: p.solves,
+        })
+        .collect();
+    points.sort_by(|a, b| {
+        b.first_seconds
+            .partial_cmp(&a.first_seconds)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(points)
+}
+
+/// The personal rating after each attempt, reconstructed by replaying the same
+/// Elo update the trainer applies.
+///
+/// Nothing extra is stored for this: the attempt log already holds every
+/// puzzle's rating and whether it was solved, so the trajectory is derived
+/// rather than remembered, and cannot drift from what actually happened.
+pub fn rating_history(store: &Store) -> Result<Vec<(chrono::DateTime<chrono::Utc>, f64)>> {
+    let mut rating = f64::from(crate::grade::RATING_FLOOR);
+    Ok(store
+        .attempt_log()?
+        .into_iter()
+        .map(|(at, puzzle_rating, correct)| {
+            rating = crate::grade::next_rating(rating, f64::from(puzzle_rating), correct);
+            (at, rating)
+        })
+        .collect())
+}
+
+/// One finished game, for the accuracy series.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GamePoint {
+    pub played_at: chrono::DateTime<chrono::Utc>,
+    pub accuracy: f64,
+    pub blunders_per_100: f64,
+    pub result: String,
+}
+
+pub fn game_points(store: &Store) -> Result<Vec<GamePoint>> {
+    Ok(store
+        .games()?
+        .into_iter()
+        .map(|g| GamePoint {
+            played_at: g.played_at,
+            accuracy: g.accuracy,
+            blunders_per_100: if g.moves == 0 {
+                0.0
+            } else {
+                f64::from(g.blunders) * 100.0 / f64::from(g.moves)
+            },
+            result: g.result,
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod series_tests {
+    use super::*;
+    use crate::grade::RATING_FLOOR;
+    use crate::store::AttemptRecord;
+    use chrono::{Duration, TimeZone, Utc};
+    use rs_fsrs::Rating;
+
+    fn store_with(attempts: &[(&str, i64, bool, u32)]) -> Store {
+        let store = Store::in_memory().unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap();
+        for (i, (id, secs, correct, rating)) in attempts.iter().enumerate() {
+            store
+                .record_attempt(&AttemptRecord {
+                    puzzle_id: (*id).to_owned(),
+                    reviewed_at: base + Duration::minutes(i as i64),
+                    elapsed: Duration::seconds(*secs),
+                    correct: *correct,
+                    grade: if *correct { Rating::Good } else { Rating::Again },
+                    puzzle_rating: *rating,
+                })
+                .unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn only_repeated_puzzles_become_slope_lines() {
+        let store = store_with(&[
+            ("a", 40, true, 1150),
+            ("b", 30, true, 1150),
+            ("a", 20, true, 1150),
+        ]);
+        let points = slope_points(&store).unwrap();
+        assert_eq!(points.len(), 1, "a puzzle solved once is not a line");
+        assert_eq!(points[0].puzzle_id, "a");
+        assert_eq!(points[0].first_seconds, 40.0);
+        assert_eq!(points[0].latest_seconds, 20.0);
+        assert!(points[0].improved());
+    }
+
+    #[test]
+    fn a_slower_repeat_is_not_marked_as_improvement() {
+        let store = store_with(&[("a", 20, true, 1150), ("a", 45, true, 1150)]);
+        let points = slope_points(&store).unwrap();
+        assert!(!points[0].improved());
+    }
+
+    #[test]
+    fn failed_repeats_are_excluded_from_the_slope() {
+        let store = store_with(&[("a", 40, true, 1150), ("a", 2, false, 1150)]);
+        assert!(
+            slope_points(&store).unwrap().is_empty(),
+            "a fast wrong answer must not look like a fast solve"
+        );
+    }
+
+    #[test]
+    fn slope_lines_are_ordered_by_the_original_solve_time() {
+        let store = store_with(&[
+            ("a", 10, true, 1150),
+            ("b", 60, true, 1150),
+            ("a", 5, true, 1150),
+            ("b", 30, true, 1150),
+        ]);
+        let points = slope_points(&store).unwrap();
+        assert_eq!(points[0].puzzle_id, "b", "slowest first solve should lead");
+    }
+
+    #[test]
+    fn the_rating_history_starts_at_the_floor_and_follows_the_attempts() {
+        let store = store_with(&[
+            ("a", 20, true, 1400),
+            ("b", 20, true, 1400),
+            ("c", 20, true, 1400),
+        ]);
+        let history = rating_history(&store).unwrap();
+        assert_eq!(history.len(), 3);
+        assert!(history[0].1 > f64::from(RATING_FLOOR), "a solve should raise it");
+        assert!(history[2].1 > history[0].1, "a streak should keep raising it");
+    }
+
+    #[test]
+    fn the_rating_history_never_dips_below_the_floor() {
+        let losses: Vec<(&str, i64, bool, u32)> =
+            (0..20).map(|_| ("x", 5, false, 2200)).collect();
+        let store = store_with(&losses);
+        for (_, rating) in rating_history(&store).unwrap() {
+            assert!(rating >= f64::from(RATING_FLOOR), "dipped to {rating}");
+        }
+    }
+
+    #[test]
+    fn an_empty_log_produces_empty_series() {
+        let store = Store::in_memory().unwrap();
+        assert!(slope_points(&store).unwrap().is_empty());
+        assert!(rating_history(&store).unwrap().is_empty());
+        assert!(game_points(&store).unwrap().is_empty());
+    }
+}

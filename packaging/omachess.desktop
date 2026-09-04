@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Omachess
+GenericName=Chess Trainer
+Comment=Chess study with spaced repetition and solve-time tracking
+Exec=omachess
+Icon=omachess
+Terminal=false
+Categories=Game;BoardGame;
+Keywords=chess;puzzle;tactics;training;study;spaced repetition;
+StartupNotify=true
+StartupWMClass=dev.omachess.Omachess

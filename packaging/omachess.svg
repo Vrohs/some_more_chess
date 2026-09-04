@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <rect x="8" y="8" width="112" height="112" rx="14" fill="#6b4423"/>
+  <g>
+    <rect x="20" y="20" width="44" height="44" fill="#e9cfa6"/>
+    <rect x="64" y="20" width="44" height="44" fill="#a9713f"/>
+    <rect x="20" y="64" width="44" height="44" fill="#a9713f"/>
+    <rect x="64" y="64" width="44" height="44" fill="#e9cfa6"/>
+  </g>
+  <!-- A falling solve-time trace: the thing the application measures. -->
+  <path d="M26 44 L44 52 L62 46 L80 68 L98 88"
+        fill="none" stroke="#111111" stroke-width="7"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>
+  <circle cx="98" cy="88" r="8" fill="#111111" opacity="0.85"/>
+</svg>

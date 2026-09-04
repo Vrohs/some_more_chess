@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/omachess-core", "crates/omachess"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Vrohs/omachess"
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = "0.4"
+rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
+rs-fsrs = "1.2"
+shakmaty = "0.30"

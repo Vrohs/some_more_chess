@@ -1,0 +1,21 @@
+[package]
+name = "omachess"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "omachess"
+path = "src/main.rs"
+
+[dependencies]
+omachess-core = { path = "../omachess-core" }
+anyhow.workspace = true
+chrono.workspace = true
+rs-fsrs.workspace = true
+shakmaty.workspace = true
+gtk4 = { version = "0.11", features = ["v4_10"] }
+libadwaita = { version = "0.9", features = ["v1_5"] }
+# Pure-Rust SVG rasteriser: librsvg no longer ships a gdk-pixbuf loader, so GTK
+# cannot rasterise SVG piece sets on its own.
+resvg = "0.48"

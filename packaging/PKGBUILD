@@ -1,0 +1,45 @@
+# Maintainer: Vivek Rohtasvi <info.rohsgaming536@gmail.com>
+pkgname=omachess
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Chess study with spaced repetition and solve-time tracking"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Vrohs/omachess"
+license=('MIT')
+depends=('gtk4' 'libadwaita')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --all-features
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    # The domain core carries the scheduling and grading logic; it needs no display.
+    cargo test --frozen --release -p omachess-core
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 "packaging/omachess.desktop" \
+        "$pkgdir/usr/share/applications/omachess.desktop"
+    install -Dm644 "packaging/omachess.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/omachess.svg"
+    install -Dm644 "themes/omachess.css.tpl" \
+        "$pkgdir/usr/share/$pkgname/themes/omachess.css.tpl"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

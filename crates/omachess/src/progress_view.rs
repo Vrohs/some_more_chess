@@ -1,0 +1,323 @@
+//! What the repeated puzzles actually show.
+//!
+//! Everything on this page is paired: each puzzle's latest correct solve
+//! against its own first. Nothing here is derived from solving new material,
+//! because a new puzzle has nothing to be compared against.
+
+use gtk4::prelude::*;
+use gtk4::{Align, Box as GtkBox, Label, Orientation};
+use omachess_core::progress::{
+    GamePoint, Improvement, PlayTrend, SlopePoint, MIN_GAMES, SIGNIFICANT,
+};
+
+use crate::charts;
+
+/// Everything the page needs, gathered once.
+pub struct ProgressData {
+    pub overall: Option<Improvement>,
+    pub bands: Vec<(u32, Improvement)>,
+    pub solved: u64,
+    pub slopes: Vec<SlopePoint>,
+    pub ratings: Vec<f64>,
+    pub games: Vec<GamePoint>,
+    pub play: Option<PlayTrend>,
+    pub repeat_mode: bool,
+}
+
+pub struct ProgressView {
+    root: GtkBox,
+}
+
+impl ProgressView {
+    pub fn new() -> Self {
+        let root = GtkBox::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(18)
+            .margin_top(20)
+            .margin_bottom(20)
+            .margin_start(20)
+            .margin_end(20)
+            .build();
+        Self { root }
+    }
+
+    pub fn widget(&self) -> &GtkBox {
+        &self.root
+    }
+
+    pub fn refresh(&self, data: &ProgressData) {
+        while let Some(child) = self.root.first_child() {
+            self.root.remove(&child);
+        }
+
+        self.root.append(&section_title("Are you solving the same puzzles faster?"));
+
+        match data.overall.as_ref() {
+            Some(overall) => {
+                self.root.append(&headline(overall));
+                self.root.append(&verdict(overall));
+            }
+            None => self.root.append(&empty_state(data.solved, data.repeat_mode)),
+        }
+
+        // The slope chart is the measurement itself, drawn: one line per
+        // repeated puzzle, from its own first solve to its own latest.
+        if !data.slopes.is_empty() {
+            let improved = data.slopes.iter().filter(|p| p.improved()).count();
+            self.root.append(&caption(&format!(
+                "{improved} of {} repeated puzzles are faster than they were. Each line is one \
+                 puzzle, compared only against itself — hover to name it.",
+                data.slopes.len()
+            )));
+            self.root.append(&charts::slope_chart(data.slopes.clone()));
+        }
+
+        if data.bands.len() > 1 {
+            self.root.append(&section_title("By rating band"));
+            for (band, improvement) in &data.bands {
+                self.root.append(&band_row(*band, improvement));
+            }
+        }
+
+        if data.ratings.len() >= 2 {
+            self.root.append(&section_title("Puzzle rating"));
+            self.root.append(&caption(
+                "Replayed from every attempt you have made: solving harder puzzles raises it, \
+                 missing easier ones lowers it. It shows the difficulty you can handle, not how \
+                 fast you handle it.",
+            ));
+            self.root.append(&charts::line_chart(data.ratings.clone(), "", None, true));
+        }
+
+        self.root.append(&section_title("Games against the engine"));
+        self.root.append(&play_section(data.play.as_ref(), data.games.len()));
+        if data.games.len() >= 2 {
+            self.root.append(&caption(
+                "Accuracy per game, oldest first. Dashed lines mark the median of the earlier \
+                 and later halves.",
+            ));
+            let reference = data
+                .play
+                .as_ref()
+                .map(|t| (t.earlier_accuracy, t.recent_accuracy));
+            self.root.append(&charts::line_chart(
+                charts::accuracy_values(&data.games),
+                "%",
+                reference,
+                true,
+            ));
+        }
+
+        self.root.append(&method_note());
+    }
+}
+
+fn section_title(text: &str) -> Label {
+    let label = Label::builder().label(text).halign(Align::Start).build();
+    label.add_css_class("title-4");
+    label
+}
+
+fn caption(text: &str) -> Label {
+    let label = Label::builder()
+        .label(text)
+        .halign(Align::Start)
+        .wrap(true)
+        .max_width_chars(74)
+        .build();
+    label.add_css_class("dim-label");
+    label
+}
+
+fn empty_state(solved: u64, repeat_mode: bool) -> GtkBox {
+    let outer = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(10)
+        .build();
+
+    let title = Label::builder().label("Nothing measured yet").build();
+    title.add_css_class("title-2");
+    title.set_halign(Align::Start);
+
+    let body = Label::builder()
+        .label(format!(
+            "You have solved {solved} puzzle{}.\n\n\
+             Solving new puzzles builds your repertoire, but it cannot measure \
+             progress — a puzzle you have never seen has nothing to compare against.\n\n\
+             {}",
+            if solved == 1 { "" } else { "s" },
+            if repeat_mode {
+                "Repeat is on — keep going. Five repeated puzzles are needed before anything \
+                 is claimed."
+            } else {
+                "Turn on Repeat in the Train tab. It serves back puzzles you have already \
+                 solved, and each one is then timed against your own first solve of it."
+            }
+        ))
+        .justify(gtk4::Justification::Left)
+        .wrap(true)
+        .max_width_chars(58)
+        .build();
+    body.add_css_class("dim-label");
+
+    outer.append(&title);
+    outer.append(&body);
+    outer
+}
+
+fn headline(result: &Improvement) -> GtkBox {
+    let outer = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(4)
+        .build();
+
+    let improving = result.median_speedup >= 1.0;
+    let percent = ((result.median_speedup - 1.0) * 100.0).abs();
+
+    let value = Label::builder()
+        .label(format!(
+            "{percent:.0}% {}",
+            if improving { "faster" } else { "slower" }
+        ))
+        .halign(Align::Start)
+        .build();
+    value.add_css_class("title-1");
+    value.add_css_class(if improving { "improving" } else { "slowing" });
+    value.add_css_class("omachess-change");
+
+    let basis = Label::builder()
+        .label(format!(
+            "median across {} puzzle{} you had already solved · {:.1}s → {:.1}s",
+            result.puzzles,
+            if result.puzzles == 1 { "" } else { "s" },
+            seconds(result.median_first),
+            seconds(result.median_latest),
+        ))
+        .halign(Align::Start)
+        .build();
+    basis.add_css_class("dim-label");
+
+    outer.append(&value);
+    outer.append(&basis);
+    outer
+}
+
+fn verdict(result: &Improvement) -> Label {
+    // The counts and the probability are stated plainly, because "faster" on
+    // its own is a claim and this is the evidence for it.
+    let text = format!(
+        "{} faster, {} slower, {} unchanged.\n{}",
+        result.faster,
+        result.slower,
+        result.unchanged,
+        if result.is_significant() && result.median_speedup >= 1.0 {
+            format!(
+                "Unlikely to be chance (p = {:.3}, below the {SIGNIFICANT} threshold).",
+                result.p_value
+            )
+        } else {
+            format!(
+                "Not yet distinguishable from chance (p = {:.3}). Repeat more puzzles.",
+                result.p_value
+            )
+        }
+    );
+    let label = Label::builder().label(text).halign(Align::Start).wrap(true).build();
+    label.add_css_class("dim-label");
+    label
+}
+
+fn band_row(band: u32, result: &Improvement) -> Label {
+    let improving = result.median_speedup >= 1.0;
+    let percent = ((result.median_speedup - 1.0) * 100.0).abs();
+    let label = Label::builder()
+        .label(format!(
+            "{band}–{}   {:.1}s → {:.1}s   {percent:.0}% {}   ({} puzzles, p = {:.3})",
+            band + 99,
+            seconds(result.median_first),
+            seconds(result.median_latest),
+            if improving { "faster" } else { "slower" },
+            result.puzzles,
+            result.p_value,
+        ))
+        .halign(Align::Start)
+        .build();
+    label.add_css_class("monospace");
+    label
+}
+
+fn method_note() -> Label {
+    let label = Label::builder()
+        .label(
+            "Each puzzle is compared only against itself, so puzzle difficulty \
+             cannot masquerade as progress. Only correct solves are timed, and \
+             the probability is a one-sided sign test over how many puzzles \
+             improved.",
+        )
+        .halign(Align::Start)
+        .wrap(true)
+        .max_width_chars(70)
+        .build();
+    label.add_css_class("dim-label");
+    label
+}
+
+fn seconds(span: chrono::Duration) -> f64 {
+    span.num_milliseconds() as f64 / 1000.0
+}
+
+/// How the engine games have gone, which is a separate question from how the
+/// puzzles have gone and is held to a weaker standard of evidence.
+fn play_section(trend: Option<&PlayTrend>, games: usize) -> GtkBox {
+    let outer = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(6)
+        .build();
+
+    let Some(trend) = trend else {
+        outer.append(&caption(&format!(
+            "{games} game{} played. {MIN_GAMES} are needed before the earlier and later halves \
+             can be compared.",
+            if games == 1 { "" } else { "s" }
+        )));
+        return outer;
+    };
+
+    let improving = trend.recent_accuracy >= trend.earlier_accuracy;
+    let value = Label::builder()
+        .label(format!(
+            "Accuracy {:.1}% → {:.1}%",
+            trend.earlier_accuracy, trend.recent_accuracy
+        ))
+        .halign(Align::Start)
+        .build();
+    value.add_css_class("title-2");
+    value.add_css_class("omachess-change");
+    value.add_css_class(if improving { "improving" } else { "slowing" });
+
+    let detail = Label::builder()
+        .label(format!(
+            "blunders {:.1} → {:.1} per 100 moves over {} games\n{}",
+            trend.earlier_blunders_per_100,
+            trend.recent_blunders_per_100,
+            trend.games,
+            if trend.is_significant() {
+                format!("Unlikely to be chance (Mann-Whitney p = {:.3}).", trend.p_value)
+            } else {
+                format!("Not yet distinguishable from chance (p = {:.3}).", trend.p_value)
+            }
+        ))
+        .halign(Align::Start)
+        .wrap(true)
+        .max_width_chars(74)
+        .build();
+    detail.add_css_class("dim-label");
+
+    outer.append(&value);
+    outer.append(&detail);
+    outer.append(&caption(
+        "Weaker evidence than the puzzle figure above: games are not paired and no two are \
+         alike. What keeps them comparable is that the opponent is pinned near your rating.",
+    ));
+    outer
+}
