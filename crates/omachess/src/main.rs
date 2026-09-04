@@ -2,6 +2,7 @@
 
 mod board;
 mod charts;
+mod endgame_view;
 mod engine_worker;
 mod pieces;
 mod play_view;
@@ -541,7 +542,13 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
     }
 
     let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone());
-    let play = play_view::PlayView::new(store, pieces.clone(), sounds, engine.clone());
+    let play = play_view::PlayView::new(
+        store.clone(),
+        pieces.clone(),
+        sounds.clone(),
+        engine.clone(),
+    );
+    let endgames = endgame_view::EndgameView::new(store, pieces.clone(), sounds, engine.clone());
     let study = study_view::StudyView::new(pieces, engine);
 
     let progress = progress_view::ProgressView::new();
@@ -562,6 +569,12 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         "media-playback-start-symbolic",
     );
     stack.add_titled_with_icon(
+        endgames.widget(),
+        Some("endgames"),
+        "Endgames",
+        "view-grid-symbolic",
+    );
+    stack.add_titled_with_icon(
         study.widget(),
         Some("study"),
         "Study",
@@ -576,7 +589,7 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
 
     // The report only means anything once solves exist, so rebuild it on view.
     //
-    // This closure also owns the two view objects. GTK keeps the widgets alive
+    // This closure also owns the view objects. GTK keeps the widgets alive
     // by refcount, but the structs behind them are plain `Rc`s, and every
     // handler holds only a `Weak` back-reference to avoid a cycle. Without a
     // strong reference living as long as the window, both views are dropped the
@@ -585,8 +598,11 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         let trainer = trainer.clone();
         let play = play.clone();
         let study = study.clone();
+        let endgames = endgames.clone();
         stack.connect_visible_child_name_notify(move |stack| {
-            let _keep_alive = (&play, &study);
+            // Dropping any of these leaves live widgets whose handlers all hold
+            // only weak references, so the tab silently stops responding.
+            let _keep_alive = (&play, &study, &endgames);
             if stack.visible_child_name().as_deref() == Some("progress") {
                 progress.refresh(&trainer.progress_data());
             }

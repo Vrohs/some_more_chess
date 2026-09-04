@@ -1,0 +1,416 @@
+//! Converting theoretical endgames against the best defence the engine has.
+//!
+//! Everything else here measures against something arguable. This does not: the
+//! position is a win or it is not, the tablebase said which, and either you
+//! converted it or you did not. It is the plainest evidence of skill the
+//! application can produce.
+
+use std::cell::{Cell, RefCell};
+use std::rc::{Rc, Weak};
+
+use gtk4::prelude::*;
+use gtk4::{
+    glib, Align, AspectFrame, Box as GtkBox, Button, DropDown, Label, Orientation, StringList,
+};
+use omachess_core::endgame::{self, Endgame, Objective, Outcome, ENDGAMES};
+use omachess_core::game::{find_move, Game};
+use omachess_core::store::Store;
+use shakmaty::{Color, Position, Square};
+
+use crate::board::BoardView;
+use crate::engine_worker::{EngineWorker, Reply, Request};
+use crate::pieces::PieceSet;
+use crate::sound::{Cue, Sounds};
+
+/// How long the engine gets for each defensive move. Long enough that the
+/// defence is genuinely hard, short enough that a session is not a wait.
+const DEFENCE_MS: u64 = 700;
+const POLL_MS: u32 = 80;
+
+pub struct EndgameView {
+    root: GtkBox,
+    board: Rc<BoardView>,
+    sounds: Rc<Sounds>,
+    store: Rc<RefCell<Store>>,
+    worker: Option<EngineWorker>,
+    game: RefCell<Option<Game>>,
+    /// Which entry of `ENDGAMES` is loaded.
+    current: Cell<usize>,
+    picker: DropDown,
+    title: Label,
+    objective: Label,
+    idea: Label,
+    status: Label,
+    record: Label,
+    countdown: Label,
+    start: Button,
+    thinking: Cell<bool>,
+    /// Set once the attempt has been judged, so it is recorded exactly once.
+    settled: Cell<bool>,
+}
+
+impl EndgameView {
+    pub fn new(
+        store: Rc<RefCell<Store>>,
+        pieces: Option<Rc<PieceSet>>,
+        sounds: Rc<Sounds>,
+        engine: Option<std::path::PathBuf>,
+    ) -> Rc<Self> {
+        let board = BoardView::new(pieces);
+        let worker = engine.map(EngineWorker::spawn);
+
+        let names: Vec<&str> = ENDGAMES.iter().map(|e| e.name).collect();
+        let picker = DropDown::new(Some(StringList::new(&names)), gtk4::Expression::NONE);
+        picker.set_valign(Align::Center);
+
+        let title = Label::builder().halign(Align::Start).wrap(true).build();
+        title.add_css_class("title-4");
+
+        let objective = Label::builder().halign(Align::Start).build();
+        objective.add_css_class("omachess-status");
+
+        let idea = Label::builder()
+            .halign(Align::Start)
+            .wrap(true)
+            .max_width_chars(38)
+            .build();
+        idea.add_css_class("dim-label");
+
+        let status = Label::builder()
+            .halign(Align::Start)
+            .wrap(true)
+            .max_width_chars(38)
+            .build();
+
+        let record = Label::builder().halign(Align::Start).build();
+        record.add_css_class("dim-label");
+
+        let countdown = Label::builder().halign(Align::Start).build();
+        countdown.add_css_class("dim-label");
+
+        let start = Button::with_label("Begin");
+        start.add_css_class("suggested-action");
+
+        let controls = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        controls.append(&picker);
+        controls.append(&start);
+
+        let panel = GtkBox::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(10)
+            .build();
+        panel.set_width_request(320);
+        panel.append(&title);
+        panel.append(&objective);
+        panel.append(&idea);
+        panel.append(&controls);
+        panel.append(&status);
+        panel.append(&countdown);
+        panel.append(&record);
+
+        let frame = AspectFrame::builder()
+            .ratio(1.0)
+            .obey_child(false)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        frame.set_child(Some(board.widget()));
+
+        let root = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(18)
+            .build();
+        root.append(&frame);
+        root.append(&panel);
+
+        let view = Rc::new(Self {
+            root,
+            board,
+            sounds,
+            store,
+            worker,
+            game: RefCell::new(None),
+            current: Cell::new(0),
+            picker,
+            title,
+            objective,
+            idea,
+            status,
+            record,
+            countdown,
+            start,
+            thinking: Cell::new(false),
+            settled: Cell::new(true),
+        });
+
+        view.describe(0);
+
+        let weak: Weak<Self> = Rc::downgrade(&view);
+        view.picker.connect_selected_notify(move |picker| {
+            if let Some(view) = weak.upgrade() {
+                view.describe(picker.selected() as usize);
+            }
+        });
+
+        let weak: Weak<Self> = Rc::downgrade(&view);
+        view.start.connect_clicked(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.begin();
+            }
+        });
+
+        let weak: Weak<Self> = Rc::downgrade(&view);
+        view.board.connect_drag(move |from, to| {
+            if let Some(view) = weak.upgrade() {
+                view.play(from, to);
+            }
+        });
+
+        if view.worker.is_some() {
+            let weak: Weak<Self> = Rc::downgrade(&view);
+            glib::timeout_add_local(
+                std::time::Duration::from_millis(POLL_MS as u64),
+                move || match weak.upgrade() {
+                    Some(view) => {
+                        view.collect();
+                        glib::ControlFlow::Continue
+                    }
+                    None => glib::ControlFlow::Break,
+                },
+            );
+        }
+
+        view
+    }
+
+    pub fn widget(&self) -> &GtkBox {
+        &self.root
+    }
+
+    fn entry(&self) -> &'static Endgame {
+        &ENDGAMES[self.current.get().min(ENDGAMES.len() - 1)]
+    }
+
+    /// Show what an endgame asks before it is started.
+    fn describe(&self, index: usize) {
+        self.current.set(index.min(ENDGAMES.len() - 1));
+        let entry = self.entry();
+        self.title.set_label(entry.name);
+        self.objective.set_label(&match entry.objective {
+            Objective::Win => match entry.dtm {
+                Some(dtm) => format!("Win it — mate in {dtm} with best play"),
+                None => "Win it".to_owned(),
+            },
+            Objective::Draw => "Hold the draw".to_owned(),
+        });
+        self.idea.set_label(entry.idea);
+        if let Some(position) = entry.position() {
+            self.board.set_position(&position);
+            self.board.set_orientation(Color::White);
+        }
+        self.status.set_label("");
+        self.countdown.set_label("");
+        self.show_record();
+    }
+
+    fn show_record(&self) {
+        let entry = self.entry();
+        let (attempts, achieved) = self
+            .store
+            .borrow()
+            .endgame_record(entry.key)
+            .unwrap_or((0, 0));
+        self.record.set_label(&if attempts == 0 {
+            "Not attempted yet.".to_owned()
+        } else {
+            format!(
+                "Converted {achieved} of {attempts} attempt{}.",
+                if attempts == 1 { "" } else { "s" }
+            )
+        });
+    }
+
+    fn begin(&self) {
+        let entry = self.entry();
+        let Some(game) = Game::from_fen(Color::White, entry.fen) else {
+            self.status.set_label("This position could not be set up.");
+            return;
+        };
+        self.board.set_position(game.position());
+        self.board.set_orientation(Color::White);
+        self.board.set_last_move(None);
+        self.board.set_mate(None);
+        *self.game.borrow_mut() = Some(game);
+        self.settled.set(false);
+        self.thinking.set(false);
+        self.status
+            .set_label("Your move. The engine defends at full strength.");
+        self.update_countdown();
+    }
+
+    fn update_countdown(&self) {
+        let game = self.game.borrow();
+        let Some(game) = game.as_ref() else {
+            self.countdown.set_label("");
+            return;
+        };
+        let left = endgame::moves_until_fifty(game.position());
+        self.countdown.set_label(&match self.entry().objective {
+            Objective::Win => format!("{left} moves before the fifty-move draw."),
+            Objective::Draw => format!("{left} moves to survive."),
+        });
+    }
+
+    /// The player's move.
+    fn play(&self, from: Square, to: Square) {
+        if self.thinking.get() || self.settled.get() {
+            return;
+        }
+        let mut slot = self.game.borrow_mut();
+        let Some(game) = slot.as_mut() else {
+            return;
+        };
+        if game.position().turn() != Color::White {
+            return;
+        }
+        let Some(mv) = find_move(game.position(), from, to, None) else {
+            self.board.set_wrong(true);
+            return;
+        };
+        let capture = game.position().board().occupied().contains(to);
+        if game.play(&mv).is_err() {
+            self.board.set_wrong(true);
+            return;
+        }
+        self.board.set_wrong(false);
+        self.board.set_position(game.position());
+        self.board.set_last_move(Some((from, to)));
+        self.sounds
+            .play(if capture { Cue::Capture } else { Cue::Move });
+        drop(slot);
+
+        self.update_countdown();
+        if self.judge() {
+            return;
+        }
+        self.ask_engine();
+    }
+
+    /// Judge the position if it has finished. Returns whether it had.
+    fn judge(&self) -> bool {
+        let (finished, moves) = {
+            let game = self.game.borrow();
+            let Some(game) = game.as_ref() else {
+                return false;
+            };
+            (
+                endgame::conclusion(game.position()),
+                game.moves().len() as u32,
+            )
+        };
+        let Some(winner) = finished else {
+            return false;
+        };
+        if self.settled.replace(true) {
+            return true;
+        }
+
+        let entry = self.entry();
+        let outcome = entry.judge(winner);
+        let achieved = outcome == Outcome::Achieved;
+        let _ = self
+            .store
+            .borrow()
+            .record_endgame(entry.key, chrono::Utc::now(), achieved, moves);
+
+        self.status
+            .set_label(&match (entry.objective, winner, achieved) {
+                (Objective::Win, Some(Color::White), _) => "Converted.".to_owned(),
+                (Objective::Win, None, _) => {
+                    "Drawn — the win was there and it got away. Try it again.".to_owned()
+                }
+                (Objective::Win, Some(_), _) => "Lost a won position.".to_owned(),
+                (Objective::Draw, None, _) => "Held.".to_owned(),
+                (Objective::Draw, Some(Color::White), _) => {
+                    "Won a position that was only level.".to_owned()
+                }
+                (Objective::Draw, Some(_), _) => {
+                    "Lost a position that was a draw. That is the one to study.".to_owned()
+                }
+            });
+        self.countdown.set_label("");
+        self.show_record();
+        true
+    }
+
+    fn ask_engine(&self) {
+        let Some(worker) = self.worker.as_ref() else {
+            self.status
+                .set_label("No engine, so there is nothing to play against.");
+            return;
+        };
+        let (fen, moves) = {
+            let game = self.game.borrow();
+            let Some(game) = game.as_ref() else {
+                return;
+            };
+            (game.initial_fen().to_owned(), game.moves().to_vec())
+        };
+        self.thinking.set(true);
+        worker.send(Request::BestMove {
+            fen,
+            moves,
+            millis: DEFENCE_MS,
+        });
+    }
+
+    fn collect(&self) {
+        let Some(worker) = self.worker.as_ref() else {
+            return;
+        };
+        while let Some(reply) = worker.poll() {
+            match reply {
+                Reply::Move(uci) => self.apply_engine_move(&uci),
+                Reply::Failed(why) => {
+                    self.thinking.set(false);
+                    self.status.set_label(&format!("The engine stopped: {why}"));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn apply_engine_move(&self, uci: &str) {
+        self.thinking.set(false);
+        let mut slot = self.game.borrow_mut();
+        let Some(game) = slot.as_mut() else {
+            return;
+        };
+        let Ok(parsed) = uci.parse::<shakmaty::uci::UciMove>() else {
+            return;
+        };
+        let Ok(mv) = parsed.to_move(game.position()) else {
+            return;
+        };
+        let capture = mv.is_capture();
+        let (from, to) = (mv.from(), Some(mv.to()));
+        if game.play(&mv).is_err() {
+            self.status
+                .set_label("The engine offered a move that is not legal here.");
+            return;
+        }
+        self.board.set_position(game.position());
+        if let (Some(from), Some(to)) = (from, to) {
+            self.board.set_last_move(Some((from, to)));
+        }
+        self.sounds
+            .play(if capture { Cue::Capture } else { Cue::Move });
+        drop(slot);
+
+        self.update_countdown();
+        self.judge();
+    }
+}

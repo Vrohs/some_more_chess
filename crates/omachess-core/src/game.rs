@@ -170,6 +170,26 @@ impl Game {
         }
     }
 
+    /// Start from a given position rather than the initial array, which is
+    /// what a studied endgame needs.
+    pub fn from_fen(player: Color, fen: &str) -> Option<Self> {
+        use shakmaty::fen::Fen;
+        use shakmaty::CastlingMode;
+        let position: Chess = fen
+            .parse::<Fen>()
+            .ok()?
+            .into_position(CastlingMode::Standard)
+            .ok()?;
+        Some(Self {
+            initial_fen: fen.to_owned(),
+            position,
+            moves: Vec::new(),
+            san: Vec::new(),
+            player,
+            resigned: false,
+        })
+    }
+
     pub fn position(&self) -> &Chess {
         &self.position
     }

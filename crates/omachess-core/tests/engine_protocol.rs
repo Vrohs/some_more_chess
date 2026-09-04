@@ -200,3 +200,74 @@ fn a_reasonable_opening_produces_no_blunders() {
         analysis.accuracy()
     );
 }
+
+/// Play a studied endgame out with the engine on both sides and report who won.
+///
+/// The point is not the engine's strength but the claim attached to the
+/// position: a set of endgames is only worth training against if the winnable
+/// ones are actually winnable and the drawn ones actually hold.
+fn play_out(engine: &mut Engine, fen: &str, movetime: Duration) -> Option<Option<shakmaty::Color>> {
+    use omachess_core::endgame::conclusion;
+    use omachess_core::game::{find_move, Game};
+    use shakmaty::{uci::UciMove, Color, Position};
+
+    let mut game = Game::from_fen(Color::White, fen)?;
+    for _ in 0..300 {
+        if let Some(result) = conclusion(game.position()) {
+            return Some(result);
+        }
+        let analysis = engine
+            .analyse(game.initial_fen(), game.moves(), Limit::Movetime(movetime))
+            .ok()?;
+        let uci: UciMove = analysis.best_move?.parse().ok()?;
+        let from = uci.to_move(game.position()).ok()?.from()?;
+        let to = uci.to_move(game.position()).ok()?.to();
+        let mv = find_move(game.position(), from, to, None)?;
+        game.play(&mv).ok()?;
+    }
+    None
+}
+
+#[test]
+fn a_won_endgame_is_actually_won() {
+    use omachess_core::endgame::find;
+    let mut engine = engine_or_skip!();
+    engine.limit_strength(None).expect("full strength");
+
+    // Queen against a lone king: short enough to play out in a test, and if
+    // this cannot be converted the whole set is suspect.
+    let entry = find("queen-mate").expect("queen mate is in the set");
+    let winner = play_out(&mut engine, entry.fen, Duration::from_millis(150))
+        .expect("the game should finish");
+    assert_eq!(
+        winner,
+        Some(shakmaty::Color::White),
+        "{} is recorded as won but was not converted",
+        entry.key
+    );
+    assert_eq!(
+        entry.judge(winner),
+        omachess_core::endgame::Outcome::Achieved
+    );
+}
+
+#[test]
+fn a_drawn_endgame_really_holds() {
+    use omachess_core::endgame::find;
+    let mut engine = engine_or_skip!();
+    engine.limit_strength(None).expect("full strength");
+
+    // A pawn down and level: best play from both sides must not produce a win.
+    let entry = find("kp-defence").expect("the defence is in the set");
+    let winner = play_out(&mut engine, entry.fen, Duration::from_millis(150))
+        .expect("the game should finish");
+    assert_eq!(
+        winner, None,
+        "{} is recorded as drawn but someone won it",
+        entry.key
+    );
+    assert_eq!(
+        entry.judge(winner),
+        omachess_core::endgame::Outcome::Achieved
+    );
+}

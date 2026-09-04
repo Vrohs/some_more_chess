@@ -89,6 +89,18 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- One attempt at converting a theoretical endgame. Whether a won position was
+-- won is the least arguable measurement in the application, so it is kept
+-- separate from puzzle attempts rather than blended into them.
+CREATE TABLE IF NOT EXISTS endgame_attempts (
+    id           INTEGER PRIMARY KEY,
+    endgame_key  TEXT NOT NULL,
+    attempted_at TEXT NOT NULL,
+    achieved     INTEGER NOT NULL,
+    moves        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS endgame_attempts_key ON endgame_attempts (endgame_key, attempted_at);
 "#;
 
 /// A solve longer than this was not a solve: the solver walked away, took a
@@ -750,6 +762,45 @@ impl Store {
             params![source, player],
             |r| r.get::<_, i64>(0),
         )? > 0)
+    }
+
+    // -- endgames --------------------------------------------------------
+
+    pub fn record_endgame(
+        &self,
+        key: &str,
+        at: DateTime<Utc>,
+        achieved: bool,
+        moves: u32,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO endgame_attempts (endgame_key, attempted_at, achieved, moves)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![key, at, achieved as i64, moves],
+        )?;
+        Ok(())
+    }
+
+    /// Attempts and successes for one endgame, most recent attempt last.
+    pub fn endgame_record(&self, key: &str) -> Result<(u32, u32)> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(achieved), 0)
+                 FROM endgame_attempts WHERE endgame_key = ?1",
+                params![key],
+                |r| Ok((r.get::<_, i64>(0)? as u32, r.get::<_, i64>(1)? as u32)),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Every endgame attempt, oldest first, for the progress readout.
+    pub fn endgame_attempts(&self) -> Result<Vec<(String, DateTime<Utc>, bool)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT endgame_key, attempted_at, achieved
+             FROM endgame_attempts ORDER BY attempted_at ASC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Games oldest first, which is the order a trend is read in.

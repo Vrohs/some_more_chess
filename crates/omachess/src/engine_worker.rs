@@ -23,6 +23,13 @@ pub enum Request {
         moves: Vec<String>,
         elo: u32,
     },
+    /// Choose a move at full strength. A theoretical endgame is only a real
+    /// test if the defence is the best there is, so this one is never capped.
+    BestMove {
+        fen: String,
+        moves: Vec<String>,
+        millis: u64,
+    },
     /// Evaluate one position as deeply as asked, for studying a game.
     Evaluate {
         fen: String,
@@ -131,6 +138,32 @@ impl EngineWorker {
                             Err(e) => {
                                 // A protocol error means the process is no
                                 // longer trustworthy; start a fresh one next time.
+                                engine = None;
+                                Reply::Failed(format!("{e:#}"))
+                            }
+                        }
+                    }
+                    Request::BestMove { fen, moves, millis } => {
+                        if current_elo.is_some() {
+                            match active.limit_strength(None) {
+                                Ok(()) => current_elo = None,
+                                Err(e) => {
+                                    engine = None;
+                                    let _ = reply_tx.send(Reply::Failed(format!("{e:#}")));
+                                    continue;
+                                }
+                            }
+                        }
+                        match active.analyse(
+                            &fen,
+                            &moves,
+                            Limit::Movetime(Duration::from_millis(millis)),
+                        ) {
+                            Ok(analysis) => match analysis.best_move {
+                                Some(mv) => Reply::Move(mv),
+                                None => Reply::Failed("the engine returned no move".into()),
+                            },
+                            Err(e) => {
                                 engine = None;
                                 Reply::Failed(format!("{e:#}"))
                             }

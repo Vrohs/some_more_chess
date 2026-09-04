@@ -6,6 +6,7 @@
 
 pub mod backup;
 pub mod drill;
+pub mod endgame;
 pub mod engine;
 pub mod game;
 pub mod grade;
