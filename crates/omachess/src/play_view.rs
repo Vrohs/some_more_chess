@@ -886,21 +886,31 @@ impl PlayView {
         if analysis.is_empty() {
             return;
         }
-        let Some((player_white, result)) = self.game.borrow().as_ref().map(|game| {
-            (
-                game.player() == Color::White,
-                match game.verdict() {
-                    Some(Verdict::Won) => "won",
-                    Some(Verdict::Lost) => "lost",
-                    _ => "drawn",
-                }
-                .to_owned(),
-            )
-        }) else {
+        let Some((player_white, result, opening_name, book_plies)) =
+            self.game.borrow().as_ref().map(|game| {
+                let (name, plies) = match omachess_core::openings::identify(game.moves()) {
+                    Some(opening) => (opening.name, opening.plies as u32),
+                    None => (String::new(), 0),
+                };
+                (
+                    game.player() == Color::White,
+                    match game.verdict() {
+                        Some(Verdict::Won) => "won",
+                        Some(Verdict::Lost) => "lost",
+                        _ => "drawn",
+                    }
+                    .to_owned(),
+                    name,
+                    plies,
+                )
+            })
+        else {
             return;
         };
         let counts = analysis.counts();
         let record = omachess_core::store::GameRecord {
+            opening: opening_name,
+            book_plies,
             // Played here, so it is this machine's user regardless of the name
             // a PGN import happens to have remembered.
             player: String::new(),

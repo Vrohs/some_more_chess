@@ -70,6 +70,11 @@ pub struct GameRow {
     /// empty, and a restore adopts the name the target profile remembers.
     #[serde(default)]
     pub player: String,
+    /// The named opening and how far it was followed, absent in older backups.
+    #[serde(default)]
+    pub opening: String,
+    #[serde(default)]
+    pub book_plies: u32,
 }
 
 /// What a restore actually changed.
@@ -95,6 +100,8 @@ pub fn export(store: &Store) -> Result<String> {
             .into_iter()
             .map(|g| GameRow {
                 player: g.player,
+                opening: g.opening,
+                book_plies: g.book_plies,
                 played_at: g.played_at,
                 player_white: g.player_white,
                 opponent_elo: g.opponent_elo,
@@ -167,6 +174,8 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
             } else {
                 game.player.clone()
             },
+            opening: game.opening.clone(),
+            book_plies: game.book_plies,
             played_at: game.played_at,
             player_white: game.player_white,
             opponent_elo: game.opponent_elo,
@@ -227,6 +236,8 @@ mod tests {
         store.set_repeat_mode(true).unwrap();
         store
             .record_game(&GameRecord {
+                opening: String::new(),
+                book_plies: 0,
                 player: String::new(),
                 played_at: base,
                 player_white: true,

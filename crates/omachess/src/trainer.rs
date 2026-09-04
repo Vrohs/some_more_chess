@@ -264,6 +264,7 @@ impl Trainer {
             games: p::game_points(&store).unwrap_or_default(),
             play: p::play_trend(&store).unwrap_or_default(),
             endgames: p::endgame_records(&store).unwrap_or_default(),
+            openings: p::opening_records(&store).unwrap_or_default(),
             repeat_mode: store.repeat_mode().unwrap_or(false),
         }
     }

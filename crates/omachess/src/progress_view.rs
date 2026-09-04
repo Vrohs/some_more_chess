@@ -7,8 +7,9 @@
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Label, Orientation};
 use omachess_core::progress::{
-    EndgameRecord, GamePoint, Improvement, PlayTrend, SlopePoint, Transfer, Weakness, MIN_GAMES,
-    MIN_RATING_POINTS, MIN_THEME_ATTEMPTS, MIN_TRANSFER, SIGNIFICANT,
+    EndgameRecord, GamePoint, Improvement, OpeningRecord, PlayTrend, SlopePoint, Transfer,
+    Weakness, MIN_GAMES, MIN_OPENING_GAMES, MIN_RATING_POINTS, MIN_THEME_ATTEMPTS, MIN_TRANSFER,
+    SIGNIFICANT,
 };
 use omachess_core::store::MIN_REPEAT_HOURS;
 
@@ -27,6 +28,7 @@ pub struct ProgressData {
     pub games: Vec<GamePoint>,
     pub play: Option<PlayTrend>,
     pub endgames: Vec<EndgameRecord>,
+    pub openings: Vec<OpeningRecord>,
     pub repeat_mode: bool,
 }
 
@@ -129,6 +131,23 @@ impl ProgressView {
             self.root.append(&section_title("By rating band"));
             for (band, improvement) in &data.bands {
                 self.root.append(&band_row(*band, improvement));
+            }
+        }
+
+        self.root.append(&section_title("Openings"));
+        if data.openings.is_empty() {
+            self.root.append(&caption(&format!(
+                "Nothing reached {MIN_OPENING_GAMES} times yet. Openings are recorded per game as \
+                 they are played or imported, so this fills in as games accumulate.",
+            )));
+        } else {
+            self.root.append(&caption(
+                "What you actually play, worst score first. Book depth is how far you were still \
+                 following a named line — leaving it early is not a fault in itself, but leaving \
+                 it early and scoring badly is where preparation pays.",
+            ));
+            for record in &data.openings {
+                self.root.append(&opening_row(record));
             }
         }
 
@@ -271,6 +290,48 @@ fn weakness_row(weakness: &Weakness, baseline: f64) -> Label {
         .build();
     label.add_css_class("monospace");
     label
+}
+
+/// One opening's record.
+fn opening_row(record: &OpeningRecord) -> GtkBox {
+    let row = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(10)
+        .build();
+
+    let name = Label::builder()
+        .label(&record.name)
+        .halign(Align::Start)
+        .hexpand(true)
+        .wrap(true)
+        .build();
+    row.append(&name);
+
+    let book = Label::builder()
+        .label(format!("book {:.0} plies", record.mean_book_plies))
+        .halign(Align::End)
+        .build();
+    book.add_css_class("dim-label");
+    row.append(&book);
+
+    let tally = Label::builder()
+        .label(format!(
+            "{}/{}/{} · {:.0}%",
+            record.won,
+            record.drawn,
+            record.lost,
+            record.score() * 100.0
+        ))
+        .halign(Align::End)
+        .build();
+    // Half a point a game is par against an equal opponent.
+    if record.score() < 0.4 {
+        tally.add_css_class("error");
+    } else if record.score() > 0.6 {
+        tally.add_css_class("success");
+    }
+    row.append(&tally);
+    row
 }
 
 /// One endgame's conversion record.

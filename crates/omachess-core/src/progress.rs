@@ -411,6 +411,8 @@ mod game_tests {
             source: String::new(),
             phases: [crate::store::PhaseLoss::UNKNOWN; 3],
             player: String::new(),
+            opening: String::new(),
+            book_plies: 0,
         }
     }
 
@@ -1049,6 +1051,86 @@ pub const WEAKNESS_MARGIN: f64 = 0.10;
 
 /// Themes the solver handles worse than they handle puzzles generally, worst
 /// first, together with the baseline they are being judged against.
+/// How one opening has gone: how often it was reached, how it scored, and how
+/// far into a named line the player was still following theory.
+pub struct OpeningRecord {
+    pub name: String,
+    pub games: u32,
+    pub won: u32,
+    pub drawn: u32,
+    pub lost: u32,
+    /// Mean plies of named theory followed.
+    pub mean_book_plies: f64,
+    /// Mean win probability given away per move in the opening phase, or -1
+    /// where no game recorded a breakdown.
+    pub opening_loss: f64,
+}
+
+impl OpeningRecord {
+    /// Score in the usual chess sense: a win is one point, a draw is a half.
+    pub fn score(&self) -> f64 {
+        if self.games == 0 {
+            return 0.0;
+        }
+        (f64::from(self.won) + f64::from(self.drawn) / 2.0) / f64::from(self.games)
+    }
+}
+
+/// The fewest games before an opening's score means anything. Below this it is
+/// a coin flip with a name attached.
+pub const MIN_OPENING_GAMES: u32 = 4;
+
+/// Openings the player has actually reached, worst score first, so what needs
+/// work is read before what does not.
+///
+/// Openings are recorded per game rather than recomputed, so this covers only
+/// games imported or played since that was stored.
+pub fn opening_records(store: &Store) -> Result<Vec<OpeningRecord>> {
+    use std::collections::HashMap;
+    let mut grouped: HashMap<String, Vec<crate::store::GameRecord>> = HashMap::new();
+    for game in store.games_mine()? {
+        if game.opening.is_empty() {
+            continue;
+        }
+        grouped.entry(game.opening.clone()).or_default().push(game);
+    }
+
+    let mut out: Vec<OpeningRecord> = grouped
+        .into_iter()
+        .filter(|(_, games)| games.len() as u32 >= MIN_OPENING_GAMES)
+        .map(|(name, games)| {
+            let count = games.len() as u32;
+            let losses: Vec<f64> = games
+                .iter()
+                .map(|g| g.phases[0].mean_loss)
+                .filter(|loss| *loss >= 0.0)
+                .collect();
+            OpeningRecord {
+                name,
+                games: count,
+                won: games.iter().filter(|g| g.result == "won").count() as u32,
+                drawn: games.iter().filter(|g| g.result == "drawn").count() as u32,
+                lost: games.iter().filter(|g| g.result == "lost").count() as u32,
+                mean_book_plies: games.iter().map(|g| f64::from(g.book_plies)).sum::<f64>()
+                    / f64::from(count),
+                opening_loss: if losses.is_empty() {
+                    -1.0
+                } else {
+                    losses.iter().sum::<f64>() / losses.len() as f64
+                },
+            }
+        })
+        .collect();
+
+    out.sort_by(|a, b| {
+        a.score()
+            .partial_cmp(&b.score())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.games.cmp(&a.games))
+    });
+    Ok(out)
+}
+
 /// How a studied endgame has gone: attempts, conversions, and whether the most
 /// recent attempt succeeded.
 pub struct EndgameRecord {

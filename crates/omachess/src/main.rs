@@ -446,9 +446,12 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
         learned += own.len();
         store.insert_puzzles(&own)?;
 
+        let opening = omachess_core::openings::identify(&game.moves);
         let counts = analysis.counts();
         store.record_game(&GameRecord {
             player: player.clone(),
+            opening: opening.as_ref().map(|o| o.name.clone()).unwrap_or_default(),
+            book_plies: opening.as_ref().map(|o| o.plies as u32).unwrap_or(0),
             played_at: parse_date(game.date.as_deref()).unwrap_or_else(chrono::Utc::now),
             player_white: *side == shakmaty::Color::White,
             opponent_elo: game.opponent_elo(*side).unwrap_or(0),

@@ -385,6 +385,8 @@ fn another_players_import_is_never_counted_as_your_play() {
         source: source.into(),
         phases: [PhaseLoss::UNKNOWN; 3],
         player: owner.into(),
+        opening: String::new(),
+        book_plies: 0,
     };
 
     let store = Store::in_memory().unwrap();
@@ -427,6 +429,8 @@ fn the_duplicate_check_is_scoped_to_the_player() {
             source: "https://lichess.org/shared".into(),
             phases: [PhaseLoss::UNKNOWN; 3],
             player: "someone_else".into(),
+            opening: String::new(),
+            book_plies: 0,
         })
         .unwrap();
 
@@ -539,4 +543,68 @@ fn own_mistakes_mode_serves_your_own_positions_first() {
         session.next_puzzle(&store, now).unwrap().unwrap().id,
         "lichess"
     );
+}
+
+/// An opening's score is only worth showing once it has been reached enough
+/// times, and the worst one has to sort first or the page buries what needs
+/// work under what does not.
+#[test]
+fn openings_are_reported_worst_first_and_only_once_there_is_a_sample() {
+    use omachess_core::progress::{opening_records, MIN_OPENING_GAMES};
+    use omachess_core::store::{GameRecord, PhaseLoss};
+
+    let game = |opening: &str, result: &str, day: i64| GameRecord {
+        played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap() + Duration::days(day),
+        player_white: true,
+        opponent_elo: 1320,
+        result: result.into(),
+        moves: 40,
+        accuracy: 80.0,
+        mean_loss: 0.05,
+        blunders: 1,
+        mistakes: 1,
+        inaccuracies: 1,
+        source: String::new(),
+        phases: [PhaseLoss::UNKNOWN; 3],
+        player: "vrohs".into(),
+        opening: opening.into(),
+        book_plies: 6,
+    };
+
+    let store = Store::in_memory().unwrap();
+    store.set_setting("player_name", "vrohs").unwrap();
+
+    let mut day = 0;
+    // A losing opening, reached often enough to count.
+    for result in ["lost", "lost", "lost", "won"] {
+        store
+            .record_game(&game("Sicilian Defense", result, day))
+            .unwrap();
+        day += 1;
+    }
+    // A winning one, also over the threshold.
+    for result in ["won", "won", "won", "drawn"] {
+        store
+            .record_game(&game("French Defense", result, day))
+            .unwrap();
+        day += 1;
+    }
+    // Below the threshold, so it must not appear at all.
+    for _ in 0..(MIN_OPENING_GAMES - 1) {
+        store
+            .record_game(&game("Caro-Kann Defense", "lost", day))
+            .unwrap();
+        day += 1;
+    }
+
+    let records = opening_records(&store).unwrap();
+    let names: Vec<_> = records.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["Sicilian Defense", "French Defense"],
+        "worst first, and nothing under the threshold"
+    );
+    assert_eq!(records[0].score(), 0.25);
+    assert_eq!(records[1].score(), 0.875);
+    assert_eq!(records[0].mean_book_plies, 6.0);
 }
