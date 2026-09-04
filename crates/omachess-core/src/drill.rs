@@ -16,23 +16,36 @@ use crate::review::MoveAnalysis;
 pub const REVEAL_AFTER_MISSES: u32 = 2;
 
 /// What offering a move to the exercise did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Offer {
-    /// The move the engine preferred.
-    Correct,
-    /// A legal move, but not the one being looked for.
-    Wrong { reveal: bool },
+    /// The move the engine preferred. The opponent's answer has been played
+    /// for you, and `finished` says whether the line is now complete.
+    Correct {
+        reply: Option<String>,
+        finished: bool,
+    },
+    /// A legal move, but not the one being looked for. When `revealed` is set
+    /// the answer was played anyway, so the exercise can carry on.
+    Wrong {
+        revealed: Option<String>,
+        reply: Option<String>,
+        finished: bool,
+    },
     /// Not a legal move at all; nothing happened.
     Illegal,
 }
 
 pub struct Drill {
+    /// The position in front of the solver right now, which advances as the
+    /// line is worked through.
     position: Chess,
-    expected: String,
-    /// The engine's continuation from the position, as it reported it.
-    continuation: Vec<String>,
+    /// The whole line: the move that should have been played, the engine's
+    /// answer, the next move, and so on.
+    line: Vec<String>,
+    /// Index of the move now expected.
+    index: usize,
     misses: u32,
-    solved: bool,
+    finished: bool,
 }
 
 impl Drill {
@@ -44,16 +57,42 @@ impl Drill {
         if analysis.best == analysis.played {
             return None;
         }
-        // The answer must be legal in the position being posed.
-        let uci: UciMove = analysis.best.parse().ok()?;
-        uci.to_move(&position).ok()?;
+        // The engine reports its variation starting with its own choice, so the
+        // answer is not repeated when the two are stitched together.
+        let mut line = vec![analysis.best.clone()];
+        line.extend(
+            analysis
+                .best_line
+                .iter()
+                .skip_while(|m| m.as_str() == analysis.best)
+                .cloned(),
+        );
+
+        // Every move in the line must be playable, or the walkthrough would
+        // stop halfway with no explanation.
+        let mut probe = position.clone();
+        let mut playable = 0;
+        for uci in &line {
+            let Ok(parsed) = uci.parse::<UciMove>() else {
+                break;
+            };
+            let Ok(mv) = parsed.to_move(&probe) else {
+                break;
+            };
+            probe.play_unchecked(mv);
+            playable += 1;
+        }
+        if playable == 0 {
+            return None;
+        }
+        line.truncate(playable);
 
         Some(Self {
             position,
-            expected: analysis.best.clone(),
-            continuation: analysis.best_line.clone(),
+            line,
+            index: 0,
             misses: 0,
-            solved: false,
+            finished: false,
         })
     }
 
@@ -61,8 +100,9 @@ impl Drill {
         &self.position
     }
 
-    pub fn expected(&self) -> &str {
-        &self.expected
+    /// The move being looked for now.
+    pub fn expected(&self) -> Option<&str> {
+        self.line.get(self.index).map(String::as_str)
     }
 
     pub fn misses(&self) -> u32 {
@@ -70,43 +110,75 @@ impl Drill {
     }
 
     pub fn is_solved(&self) -> bool {
-        self.solved
+        self.finished
+    }
+
+    /// How far through the line the solver is, as (done, total player moves).
+    pub fn progress(&self) -> (usize, usize) {
+        let total = self.line.len().div_ceil(2);
+        (self.index.div_ceil(2), total)
     }
 
     /// Offer a move by the squares it was dragged between.
     pub fn offer(&mut self, from: Square, to: Square) -> Offer {
-        if self.solved {
+        if self.finished {
             return Offer::Illegal;
         }
-        let Some(mv) = find_move(&self.position, from, to, Some(&self.expected)) else {
+        let Some(expected) = self.expected().map(str::to_owned) else {
+            self.finished = true;
             return Offer::Illegal;
         };
-        if UciMove::from_standard(mv).to_string() == self.expected {
-            self.solved = true;
-            return Offer::Correct;
+        let Some(mv) = find_move(&self.position, from, to, Some(&expected)) else {
+            return Offer::Illegal;
+        };
+
+        if UciMove::from_standard(mv).to_string() == expected {
+            self.misses = 0;
+            let (reply, finished) = self.advance();
+            return Offer::Correct { reply, finished };
         }
+
         self.misses += 1;
-        let reveal = self.misses >= REVEAL_AFTER_MISSES;
-        if reveal {
-            self.solved = true;
+        if self.misses < REVEAL_AFTER_MISSES {
+            return Offer::Wrong {
+                revealed: None,
+                reply: None,
+                finished: false,
+            };
         }
-        Offer::Wrong { reveal }
+        // Shown, then played, so the walkthrough carries on rather than ending
+        // on a failure.
+        self.misses = 0;
+        let (reply, finished) = self.advance();
+        Offer::Wrong {
+            revealed: Some(expected),
+            reply,
+            finished,
+        }
     }
 
-    /// The moves to play out when showing the answer: the move that should have
-    /// been played, then the engine's continuation.
-    ///
-    /// Engines report their principal variation starting with their own choice,
-    /// so that first move is dropped rather than played twice.
-    pub fn reveal_line(&self) -> Vec<String> {
-        let mut line = vec![self.expected.clone()];
-        line.extend(
-            self.continuation
-                .iter()
-                .skip_while(|m| m.as_str() == self.expected)
-                .cloned(),
-        );
-        line
+    /// Play the expected move and the answer to it.
+    fn advance(&mut self) -> (Option<String>, bool) {
+        self.play_at_index();
+        let reply = self.line.get(self.index).cloned();
+        if reply.is_some() {
+            self.play_at_index();
+        }
+        self.finished = self.index >= self.line.len();
+        (reply, self.finished)
+    }
+
+    fn play_at_index(&mut self) {
+        let Some(uci) = self.line.get(self.index).cloned() else {
+            return;
+        };
+        if let Ok(mv) = uci.parse::<UciMove>().and_then(|p| {
+            p.to_move(&self.position)
+                .map_err(|_| shakmaty::uci::ParseUciMoveError)
+        }) {
+            self.position.play_unchecked(mv);
+        }
+        self.index += 1;
     }
 }
 
@@ -129,7 +201,8 @@ mod tests {
     use crate::review::{MoveAnalysis, Phase, Severity};
 
     /// After 1.e4 e5 2.Bc4 Nc6 3.Qh5, Black played Nf6?? losing to Qxf7#.
-    /// The move that should have been played is g7g6.
+    /// The move that should have been played is g7g6, and the engine's line
+    /// continues 4.Qf3 Nf6.
     fn blunder() -> MoveAnalysis {
         MoveAnalysis {
             ply: 5,
@@ -148,39 +221,83 @@ mod tests {
     #[test]
     fn the_exercise_poses_the_position_the_player_faced() {
         let drill = Drill::from_analysis(&blunder()).expect("a drill");
-        assert_eq!(drill.expected(), "g7g6");
+        assert_eq!(drill.expected(), Some("g7g6"));
         assert_eq!(
             drill.position().turn(),
             shakmaty::Color::Black,
             "the exercise must be posed to the side that erred"
         );
         assert!(!drill.is_solved());
+        assert_eq!(drill.progress(), (0, 2), "two moves to find");
     }
 
     #[test]
-    fn playing_the_right_move_solves_it_first_time() {
+    fn finding_the_move_plays_the_answer_and_asks_for_the_next() {
         let mut drill = Drill::from_analysis(&blunder()).unwrap();
-        assert_eq!(drill.offer(Square::G7, Square::G6), Offer::Correct);
-        assert!(drill.is_solved());
-        assert_eq!(drill.misses(), 0);
+        let offer = drill.offer(Square::G7, Square::G6);
+        assert_eq!(
+            offer,
+            Offer::Correct {
+                reply: Some("h5f3".into()),
+                finished: false
+            },
+            "the opponent's answer should be played for the solver"
+        );
+        assert!(!drill.is_solved(), "the line is not over");
+        assert_eq!(
+            drill.expected(),
+            Some("g8f6"),
+            "now it should ask for the next move in the line"
+        );
+        assert_eq!(drill.progress(), (1, 2));
     }
 
     #[test]
-    fn the_answer_is_given_up_after_two_wrong_moves() {
+    fn working_through_the_whole_line_finishes_it() {
+        let mut drill = Drill::from_analysis(&blunder()).unwrap();
+        drill.offer(Square::G7, Square::G6);
+        let last = drill.offer(Square::G8, Square::F6);
+        assert_eq!(
+            last,
+            Offer::Correct {
+                reply: None,
+                finished: true
+            }
+        );
+        assert!(drill.is_solved());
+        assert_eq!(drill.expected(), None);
+    }
+
+    #[test]
+    fn one_wrong_move_does_not_give_the_answer_away() {
         let mut drill = Drill::from_analysis(&blunder()).unwrap();
         assert_eq!(
             drill.offer(Square::G8, Square::F6),
-            Offer::Wrong { reveal: false },
-            "one wrong move should not give it away"
+            Offer::Wrong {
+                revealed: None,
+                reply: None,
+                finished: false
+            }
         );
-        assert!(!drill.is_solved());
+        assert_eq!(drill.expected(), Some("g7g6"), "still asking for the same move");
+    }
+
+    #[test]
+    fn the_second_wrong_move_shows_it_and_carries_on() {
+        let mut drill = Drill::from_analysis(&blunder()).unwrap();
+        drill.offer(Square::G8, Square::F6);
+        let offer = drill.offer(Square::D7, Square::D6);
         assert_eq!(
-            drill.offer(Square::D7, Square::D6),
-            Offer::Wrong { reveal: true },
-            "the second wrong move should"
+            offer,
+            Offer::Wrong {
+                revealed: Some("g7g6".into()),
+                reply: Some("h5f3".into()),
+                finished: false
+            },
+            "the answer is shown, played, and the walkthrough continues"
         );
-        assert!(drill.is_solved());
-        assert_eq!(drill.misses(), 2);
+        assert_eq!(drill.expected(), Some("g8f6"));
+        assert_eq!(drill.misses(), 0, "the count resets for the next move");
     }
 
     #[test]
@@ -191,31 +308,42 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_accepted_once_it_is_over() {
+    fn nothing_is_accepted_once_the_line_is_done() {
         let mut drill = Drill::from_analysis(&blunder()).unwrap();
         drill.offer(Square::G7, Square::G6);
-        assert_eq!(drill.offer(Square::G8, Square::F6), Offer::Illegal);
+        drill.offer(Square::G8, Square::F6);
+        assert_eq!(drill.offer(Square::D7, Square::D6), Offer::Illegal);
     }
 
     #[test]
-    fn the_revealed_line_does_not_repeat_the_answer() {
-        let drill = Drill::from_analysis(&blunder()).unwrap();
-        let line = drill.reveal_line();
-        assert_eq!(line[0], "g7g6");
-        assert_eq!(
-            line.iter().filter(|m| m.as_str() == "g7g6").count(),
-            1,
-            "the engine's variation starts with its own move: {line:?}"
-        );
-        assert_eq!(line, vec!["g7g6", "h5f3", "g8f6"]);
-    }
-
-    #[test]
-    fn a_line_with_no_continuation_still_shows_the_move() {
+    fn a_line_with_no_continuation_is_a_single_move_exercise() {
         let mut analysis = blunder();
         analysis.best_line.clear();
-        let drill = Drill::from_analysis(&analysis).unwrap();
-        assert_eq!(drill.reveal_line(), vec!["g7g6"]);
+        let mut drill = Drill::from_analysis(&analysis).unwrap();
+        assert_eq!(drill.progress(), (0, 1));
+        assert_eq!(
+            drill.offer(Square::G7, Square::G6),
+            Offer::Correct {
+                reply: None,
+                finished: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_played_out_is_truncated_not_broken() {
+        let mut analysis = blunder();
+        // A legal answer followed by nonsense.
+        analysis.best_line = vec!["g7g6".into(), "a1a8".into()];
+        let mut drill = Drill::from_analysis(&analysis).unwrap();
+        assert_eq!(
+            drill.offer(Square::G7, Square::G6),
+            Offer::Correct {
+                reply: None,
+                finished: true
+            },
+            "the unplayable tail is dropped rather than stalling the exercise"
+        );
     }
 
     #[test]
@@ -240,6 +368,7 @@ mod tests {
     fn an_answer_that_is_not_legal_here_yields_no_exercise() {
         let mut analysis = blunder();
         analysis.best = "a1a8".into();
+        analysis.best_line = vec!["a1a8".into()];
         assert!(Drill::from_analysis(&analysis).is_none());
     }
 }

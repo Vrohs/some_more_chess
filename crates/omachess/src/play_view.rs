@@ -36,8 +36,6 @@ use crate::sound::{Cue, Sounds};
 
 /// How often replies from the engine thread are collected.
 const POLL_MS: u32 = 80;
-/// Play the engine this far above the player, so it is a stretch not a wall.
-const OPPONENT_MARGIN: u32 = 100;
 
 pub struct PlayView {
     root: GtkBox,
@@ -339,11 +337,10 @@ impl PlayView {
         let rating = self
             .store
             .borrow()
-            .personal_rating()
-            .unwrap_or(f64::from(MIN_LIMITED_ELO))
-            .round()
-            .max(0.0) as u32;
-        rating.saturating_add(OPPONENT_MARGIN).max(MIN_LIMITED_ELO)
+            .play_rating()
+            .unwrap_or(f64::from(MIN_LIMITED_ELO));
+        ((rating + omachess_core::game::OPPONENT_MARGIN).round().max(0.0) as u32)
+            .max(MIN_LIMITED_ELO)
     }
 
     fn start_game(&self) {
@@ -765,8 +762,9 @@ impl PlayView {
 
         self.status.set_label("Find the move.");
         self.detail.set_label(&format!(
-            "Move {} is where the game turned — you gave away {:.0}% here. There is a better \
-             move; play it on the board.",
+            "Move {} is where the game turned — you gave away {:.0}% here. Find the move; \
+             the answer is played for you and then you find the next one, all the way \
+             through the line.",
             ply / 2 + 1,
             lost * 100.0
         ));
@@ -776,6 +774,7 @@ impl PlayView {
 
     /// Judge a move offered during the drill.
      /// Judge a move offered during the exercise.
+     /// Judge a move offered during the exercise and walk the line forward.
     fn drill_move(self: &Rc<Self>, from: Square, to: Square) {
         let outcome = match self.drill.borrow_mut().as_mut() {
             Some(drill) => drill.offer(from, to),
@@ -785,64 +784,91 @@ impl PlayView {
         match outcome {
             // A misdrag is not an answer, so it costs nothing.
             Offer::Illegal => {}
-            Offer::Correct => {
+            Offer::Correct { reply, finished } => {
                 self.sounds.play(Cue::Solved);
-                self.status.set_label("That was it.");
-                self.reveal_drill();
+                self.show_drill_position(reply.as_deref());
+                self.status.set_label(if finished {
+                    "That is the whole line."
+                } else {
+                    "Right. Now find the next one."
+                });
+                self.describe_drill(finished, None);
             }
-            Offer::Wrong { reveal } => {
+            Offer::Wrong {
+                revealed: None, ..
+            } => {
                 self.sounds.play(Cue::Wrong);
                 self.board.set_wrong(true);
                 let board = self.board.clone();
                 glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
                     board.set_wrong(false)
                 });
-                if reveal {
-                    self.status
-                        .set_label("Still not it — the answer is played out below.");
-                    self.reveal_drill();
+                self.status.set_label("Not that one. Look again.");
+            }
+            Offer::Wrong {
+                revealed: Some(answer),
+                reply,
+                finished,
+            } => {
+                self.sounds.play(Cue::Move);
+                self.show_drill_position(reply.as_deref());
+                self.status.set_label(if finished {
+                    "That was the line."
                 } else {
-                    self.status.set_label("Not that one. Look again.");
-                }
+                    "Shown — keep going from here."
+                });
+                self.describe_drill(finished, Some(&answer));
             }
         }
     }
 
-    /// Play the engine's line so the player sees what the move was for.
-     /// Play out the line so the player sees what the move was for.
-    fn reveal_drill(self: &Rc<Self>) {
-        let Some((mut position, line)) = self
+    /// Redraw the exercise position after the line has moved on.
+    fn show_drill_position(&self, reply: Option<&str>) {
+        let Some(position) = self.drill.borrow().as_ref().map(|d| d.position().clone()) else {
+            return;
+        };
+        self.board.set_position(&position);
+        self.board.select(None);
+        // Highlight the answer that was played, so it is not missed.
+        if let Some(reply) = reply.and_then(|uci| uci.parse::<shakmaty::uci::UciMove>().ok()) {
+            if let (Some(from), Some(to)) = (reply.from(), reply.to()) {
+                self.board.set_last_move(Some((from, to)));
+            }
+        }
+        self.board.set_check(
+            position
+                .is_check()
+                .then(|| position.board().king_of(position.turn()))
+                .flatten(),
+        );
+    }
+
+    /// Say where the solver is in the line, and what was just shown.
+    fn describe_drill(&self, finished: bool, revealed: Option<&str>) {
+        let progress = self
             .drill
             .borrow()
             .as_ref()
-            .map(|drill| (drill.position().clone(), drill.reveal_line()))
-        else {
-            return;
-        };
-        self.detail.set_label("This is the line you were missing.");
-
-        let board = self.board.clone();
-        let sounds = self.sounds.clone();
-        let mut remaining = line.into_iter();
-        glib::timeout_add_local(std::time::Duration::from_millis(700), move || {
-            let Some(uci) = remaining.next() else {
-                return glib::ControlFlow::Break;
-            };
-            let Ok(parsed) = uci.parse::<shakmaty::uci::UciMove>() else {
-                return glib::ControlFlow::Break;
-            };
-            let Ok(mv) = parsed.to_move(&position) else {
-                return glib::ControlFlow::Break;
-            };
-            position.play_unchecked(mv);
-            board.set_position(&position);
-            board.set_last_move(mv.from().map(|f| (f, mv.to())));
-            sounds.play(if mv.is_capture() { Cue::Capture } else { Cue::Move });
-            glib::ControlFlow::Continue
-        });
+            .map(omachess_core::drill::Drill::progress);
+        let mut text = String::new();
+        if let Some(answer) = revealed {
+            text.push_str(&format!("The move was {answer}. "));
+        }
+        match (finished, progress) {
+            (true, _) => text.push_str(
+                "That is what the position was worth. Add it to training to see it again.",
+            ),
+            (false, Some((done, total))) => {
+                text.push_str(&format!("Move {} of {total} in the line.", done + 1))
+            }
+            (false, None) => {}
+        }
+        self.detail.set_label(&text);
     }
 
-    /// Store how well the game was played, so quality can be tracked over time
+    /// Play the engine's line so the player sees what the move was for.
+     /// Play out the line so the player sees what the move was for.
+     /// Store how well the game was played, so quality can be tracked over time
     /// independently of how many were won.
     fn record_game(&self, analysis: &GameAnalysis) {
         if analysis.is_empty() {
@@ -875,7 +901,19 @@ impl PlayView {
             inaccuracies: counts.inaccuracies as u32,
             source: String::new(),
         };
-        let _ = self.store.borrow().record_game(&record);
+        let opponent = f64::from(record.opponent_elo);
+        {
+            let store = self.store.borrow();
+            let _ = store.record_game(&record);
+            // Playing strength follows results against the engine, not puzzles.
+            if let Ok(current) = store.play_rating() {
+                let _ = store.set_play_rating(omachess_core::game::next_play_rating(
+                    current,
+                    opponent,
+                    &record.result,
+                ));
+            }
+        }
     }
 
     /// List every flagged move, so the player can see what went wrong rather

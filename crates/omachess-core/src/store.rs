@@ -798,6 +798,24 @@ impl Store {
         Ok(())
     }
 
+    /// Playing strength against the engine, which is a different thing from
+    /// the puzzle rating and must not be driven by it.
+    ///
+    /// Puzzle ratings run far above playing ratings for the same person — a
+    /// 1200 player routinely solves 1600-rated puzzles — so using one to set
+    /// the other would pit the player against an opponent well above them and
+    /// call it calibration.
+    pub fn play_rating(&self) -> Result<f64> {
+        match self.setting("play_rating")? {
+            Some(v) => v.parse().context("stored play_rating is not a number"),
+            None => Ok(f64::from(crate::engine::MIN_LIMITED_ELO)),
+        }
+    }
+
+    pub fn set_play_rating(&self, rating: f64) -> Result<()> {
+        self.set_setting("play_rating", &rating.to_string())
+    }
+
     /// Whether the trainer is re-testing solved puzzles rather than teaching
     /// new ones. Measurement is only meaningful while this is on.
     pub fn repeat_mode(&self) -> Result<bool> {

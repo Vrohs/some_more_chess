@@ -9,6 +9,26 @@ use shakmaty::{Chess, Color, EnPassantMode, KnownOutcome, Move, Position, Role, 
 /// The standard starting position.
 pub const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
+/// How far above the player the engine is set. Enough to be a stretch, not
+/// enough to be a wall.
+pub const OPPONENT_MARGIN: f64 = 100.0;
+
+/// Update playing strength after a game against an engine of known strength.
+///
+/// A plain Elo update, so beating a stronger opponent moves it more than
+/// beating a weaker one, and the engine's level follows actual results rather
+/// than how well puzzles are going.
+pub fn next_play_rating(current: f64, opponent: f64, result: &str) -> f64 {
+    let score = match result {
+        "won" => 1.0,
+        "drawn" => 0.5,
+        _ => 0.0,
+    };
+    let expected = 1.0 / (1.0 + 10f64.powf((opponent - current) / 400.0));
+    let updated = current + 24.0 * (score - expected);
+    updated.max(f64::from(crate::engine::MIN_LIMITED_ELO))
+}
+
 /// Standard piece values, for the material readout.
 ///
 /// Material is shown during a game where an evaluation is not, because it is
@@ -401,6 +421,30 @@ mod tests {
             .unwrap()
             .into_position(shakmaty::CastlingMode::Standard)
             .unwrap()
+    }
+
+    #[test]
+    fn beating_the_engine_raises_playing_strength_and_losing_lowers_it() {
+        let start = 1400.0;
+        assert!(next_play_rating(start, 1400.0, "won") > start);
+        assert!(next_play_rating(start, 1400.0, "lost") < start);
+        assert_eq!(next_play_rating(start, 1400.0, "drawn"), start);
+    }
+
+    #[test]
+    fn beating_a_stronger_engine_is_worth_more() {
+        let strong = next_play_rating(1400.0, 1800.0, "won") - 1400.0;
+        let weak = next_play_rating(1400.0, 1420.0, "won") - 1400.0;
+        assert!(strong > weak * 1.5, "{strong} should far exceed {weak}");
+    }
+
+    #[test]
+    fn playing_strength_never_falls_below_what_the_engine_can_do() {
+        let mut rating = f64::from(crate::engine::MIN_LIMITED_ELO);
+        for _ in 0..40 {
+            rating = next_play_rating(rating, 2000.0, "lost");
+        }
+        assert_eq!(rating, f64::from(crate::engine::MIN_LIMITED_ELO));
     }
 
     #[test]
