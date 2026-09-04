@@ -156,6 +156,9 @@ pub struct GameRecord {
     /// Where the game came from, for imported games. Empty for games played
     /// in the application.
     pub source: String,
+    /// Whose game this is. Statistics are scoped to it, so importing another
+    /// player's export can never be counted as your own play.
+    pub player: String,
     /// Mean win probability given away per move in each phase, and how many
     /// moves were played in it. A loss of -1 means the game predates the
     /// breakdown being recorded.
@@ -231,7 +234,7 @@ impl Store {
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as u32;
 
         // Steps are appended here and never renumbered or edited once shipped.
-        let steps: [&str; 2] = [
+        let steps: [&str; 3] = [
             // Imported games need an identity of their own so a re-import does
             // not duplicate them; games played in the app leave it empty.
             "ALTER TABLE games ADD COLUMN source TEXT NOT NULL DEFAULT ''",
@@ -243,6 +246,13 @@ impl Store {
              ALTER TABLE games ADD COLUMN opening_moves INTEGER NOT NULL DEFAULT 0;
              ALTER TABLE games ADD COLUMN middlegame_moves INTEGER NOT NULL DEFAULT 0;
              ALTER TABLE games ADD COLUMN endgame_moves INTEGER NOT NULL DEFAULT 0",
+            // Games were stored with no owner, so importing a second player's
+            // export merged their play into yours with no way to tell them
+            // apart. Existing rows belong to the remembered name.
+            "ALTER TABLE games ADD COLUMN player TEXT NOT NULL DEFAULT '';
+             UPDATE games SET player =
+                 COALESCE((SELECT value FROM settings WHERE key = 'player_name'), '')
+             WHERE player = ''",
         ];
 
         for (index, sql) in steps.iter().enumerate() {
@@ -367,8 +377,23 @@ impl Store {
         }
 
         // Every probe missed — a narrow band that is exhausted, or a rare
-        // theme. Fall back to a bounded scan, which is still indexed on rating.
-        self.scan_unseen(low, high, theme)
+        // theme. Fall back to a bounded scan, which is still indexed on rating,
+        // widening the band until something unseen turns up. Returning nothing
+        // here stalls the trainer, so it must only happen when the whole
+        // corpus really is solved.
+        let mut low = low;
+        let mut high = high;
+        loop {
+            if let Some(puzzle) = self.scan_unseen(low, high, theme)? {
+                return Ok(Some(puzzle));
+            }
+            if low == RATING_FLOOR && high == u32::MAX {
+                return Ok(None);
+            }
+            let reach = (high - low).max(SELECTION_WINDOW);
+            low = low.saturating_sub(reach).max(RATING_FLOOR);
+            high = high.saturating_add(reach);
+        }
     }
 
     fn seek_unseen(
@@ -673,9 +698,9 @@ impl Store {
              (played_at, player_white, opponent_elo, result, moves, accuracy,
               mean_loss, blunders, mistakes, inaccuracies, source,
               opening_loss, middlegame_loss, endgame_loss,
-              opening_moves, middlegame_moves, endgame_moves)
+              opening_moves, middlegame_moves, endgame_moves, player)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                     ?12, ?13, ?14, ?15, ?16, ?17)",
+                     ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 game.played_at,
                 game.player_white as i64,
@@ -694,6 +719,7 @@ impl Store {
                 game.phases[0].moves,
                 game.phases[1].moves,
                 game.phases[2].moves,
+                game.player,
             ],
         )?;
         Ok(())
@@ -704,7 +730,10 @@ impl Store {
     pub fn forget_imported_games(&self) -> Result<usize> {
         Ok(self
             .conn
-            .execute("DELETE FROM games WHERE source <> ''", [])?)
+            .execute(
+                "DELETE FROM games WHERE source <> '' AND player = ?1",
+                params![self.setting("player_name")?.unwrap_or_default()],
+            )?)
     }
 
     /// Whether a game from this source is already stored.
@@ -712,23 +741,35 @@ impl Store {
         if source.is_empty() {
             return Ok(false);
         }
+        let player = self.setting("player_name")?.unwrap_or_default();
         Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM games WHERE source = ?1",
-            params![source],
+            "SELECT COUNT(*) FROM games WHERE source = ?1 AND player = ?2",
+            params![source, player],
             |r| r.get::<_, i64>(0),
         )? > 0)
     }
 
     /// Games oldest first, which is the order a trend is read in.
+    /// Every stored game, oldest first. Used for backups, which must keep
+    /// rows belonging to every name that has been imported.
     pub fn games(&self) -> Result<Vec<GameRecord>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT played_at, player_white, opponent_elo, result, moves, accuracy,
+        self.games_where(None)
+    }
+
+    /// Only the remembered player's games, oldest first. Every statistic
+    /// reads this: another player's imported export must never be counted as
+    /// your own play.
+    pub fn games_mine(&self) -> Result<Vec<GameRecord>> {
+        let player = self.setting("player_name")?.unwrap_or_default();
+        self.games_where(Some(player))
+    }
+
+    fn games_where(&self, player: Option<String>) -> Result<Vec<GameRecord>> {
+        const COLUMNS: &str = "played_at, player_white, opponent_elo, result, moves, accuracy,
                     mean_loss, blunders, mistakes, inaccuracies, source,
                     opening_loss, middlegame_loss, endgame_loss,
-                    opening_moves, middlegame_moves, endgame_moves
-             FROM games ORDER BY played_at ASC",
-        )?;
-        let rows = stmt.query_map([], |r| {
+                    opening_moves, middlegame_moves, endgame_moves, player";
+        let read = |r: &rusqlite::Row<'_>| {
             Ok(GameRecord {
                 played_at: r.get(0)?,
                 player_white: r.get::<_, i64>(1)? != 0,
@@ -746,9 +787,29 @@ impl Store {
                     PhaseLoss { mean_loss: r.get(12)?, moves: r.get(15)? },
                     PhaseLoss { mean_loss: r.get(13)?, moves: r.get(16)? },
                 ],
+                player: r.get(17)?,
             })
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        };
+        let rows = match player {
+            Some(player) => {
+                let sql = format!(
+                    "SELECT {COLUMNS} FROM games
+                     WHERE player = ?1 OR player = '' ORDER BY played_at ASC"
+                );
+                let mut stmt = self.conn.prepare_cached(&sql)?;
+                let rows = stmt
+                    .query_map(params![player], read)?
+                    .collect::<Result<Vec<_>, _>>()?;
+                rows
+            }
+            None => {
+                let sql = format!("SELECT {COLUMNS} FROM games ORDER BY played_at ASC");
+                let mut stmt = self.conn.prepare_cached(&sql)?;
+                let rows = stmt.query_map([], read)?.collect::<Result<Vec<_>, _>>()?;
+                rows
+            }
+        };
+        Ok(rows)
     }
 
     // -- backup ----------------------------------------------------------

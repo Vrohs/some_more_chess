@@ -230,7 +230,7 @@ fn command_games() -> anyhow::Result<()> {
     use omachess_core::progress::{play_trend, MIN_GAMES};
 
     let store = open_store()?;
-    let games = store.games()?;
+    let games = store.games_mine()?;
     if games.is_empty() {
         println!("No games played yet.");
         return Ok(());
@@ -398,6 +398,7 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
 
         let counts = analysis.counts();
         store.record_game(&GameRecord {
+            player: player.clone(),
             played_at: parse_date(game.date.as_deref())
                 .unwrap_or_else(chrono::Utc::now),
             player_white: *side == shakmaty::Color::White,

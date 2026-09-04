@@ -66,6 +66,10 @@ pub struct GameRow {
     /// Per-phase loss and move counts, absent in older backups.
     #[serde(default)]
     pub phases: Option<[(f64, u32); 3]>,
+    /// Whose game this is. Backups written before games had an owner leave it
+    /// empty, and a restore adopts the name the target profile remembers.
+    #[serde(default)]
+    pub player: String,
 }
 
 /// What a restore actually changed.
@@ -90,6 +94,7 @@ pub fn export(store: &Store) -> Result<String> {
             .games()?
             .into_iter()
             .map(|g| GameRow {
+                player: g.player,
                 played_at: g.played_at,
                 player_white: g.player_white,
                 opponent_elo: g.opponent_elo,
@@ -150,12 +155,18 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
         report.cards_written += 1;
     }
 
+    let restoring_as = store.setting("player_name")?.unwrap_or_default();
     for game in &backup.games {
         if store.has_game(game.played_at)? {
             report.games_skipped += 1;
             continue;
         }
         store.record_game(&GameRecord {
+            player: if game.player.is_empty() {
+                restoring_as.clone()
+            } else {
+                game.player.clone()
+            },
             played_at: game.played_at,
             player_white: game.player_white,
             opponent_elo: game.opponent_elo,
@@ -215,6 +226,7 @@ mod tests {
         store.set_repeat_mode(true).unwrap();
         store
             .record_game(&GameRecord {
+                player: String::new(),
                 played_at: base,
                 player_white: true,
                 opponent_elo: 1320,

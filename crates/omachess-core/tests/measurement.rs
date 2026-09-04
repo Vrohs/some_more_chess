@@ -356,3 +356,110 @@ fn a_same_session_repeat_is_recorded_but_never_measured() {
         "half an hour later is recall, not skill"
     );
 }
+
+/// Games had no owner, so importing another player's export merged their play
+/// into your statistics with no way to tell the two apart. Every figure the
+/// Progress view reports must come from your own games only.
+#[test]
+fn another_players_import_is_never_counted_as_your_play() {
+    use omachess_core::store::{GameRecord, PhaseLoss};
+
+    let game = |owner: &str, source: &str, day: i64| GameRecord {
+        played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap() + Duration::days(day),
+        player_white: true,
+        opponent_elo: 1320,
+        result: "lost".into(),
+        moves: 40,
+        accuracy: 80.0,
+        mean_loss: 0.05,
+        blunders: 1,
+        mistakes: 1,
+        inaccuracies: 1,
+        source: source.into(),
+        phases: [PhaseLoss::UNKNOWN; 3],
+        player: owner.into(),
+    };
+
+    let store = Store::in_memory().unwrap();
+    store.set_setting("player_name", "vrohs").unwrap();
+    store.record_game(&game("vrohs", "https://lichess.org/mine", 0)).unwrap();
+    store.record_game(&game("dark_pssenger", "https://lichess.org/theirs", 1)).unwrap();
+    // A game played in the application carries no owner and is always yours.
+    store.record_game(&game("", "", 2)).unwrap();
+
+    assert_eq!(store.games().unwrap().len(), 3, "a backup keeps every row");
+    let counted = store.games_mine().unwrap();
+    assert_eq!(counted.len(), 2, "only your own play is counted");
+    assert!(counted.iter().all(|g| g.player != "dark_pssenger"));
+}
+
+/// The same game id stored under two names belongs to two different players,
+/// so one player's copy must not make the other's look already imported.
+#[test]
+fn the_duplicate_check_is_scoped_to_the_player() {
+    use omachess_core::store::{GameRecord, PhaseLoss};
+
+    let store = Store::in_memory().unwrap();
+    store.set_setting("player_name", "vrohs").unwrap();
+    store
+        .record_game(&GameRecord {
+            played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap(),
+            player_white: true,
+            opponent_elo: 1320,
+            result: "lost".into(),
+            moves: 40,
+            accuracy: 80.0,
+            mean_loss: 0.05,
+            blunders: 1,
+            mistakes: 1,
+            inaccuracies: 1,
+            source: "https://lichess.org/shared".into(),
+            phases: [PhaseLoss::UNKNOWN; 3],
+            player: "someone_else".into(),
+        })
+        .unwrap();
+
+    assert!(
+        !store.has_game_source("https://lichess.org/shared").unwrap(),
+        "another player's copy must not block your own import"
+    );
+}
+
+/// Selection used to give up once the band around your rating was solved out,
+/// leaving the trainer with nothing to serve while unseen puzzles sat in the
+/// corpus. The band has to widen instead.
+#[test]
+fn selection_widens_rather_than_stalling_when_a_band_is_exhausted() {
+    use omachess_core::puzzle::Puzzle;
+
+    let puzzle = |id: &str, rating: u32| Puzzle {
+        id: id.into(),
+        fen: "6k1/5ppp/8/8/8/8/5PPP/1R4K1 b - - 0 1".into(),
+        moves: vec!["g8h8".into(), "b1b8".into()],
+        rating,
+        rating_deviation: 75,
+        popularity: 90,
+        nb_plays: 1000,
+        themes: vec!["mateIn1".into()],
+        game_url: "https://lichess.org/a".into(),
+        opening_tags: vec![],
+    };
+
+    let mut store = Store::in_memory().unwrap();
+    // One puzzle at the target rating, one far outside any plausible window.
+    store
+        .insert_puzzles(&[puzzle("near", RATING_FLOOR), puzzle("far", RATING_FLOOR + 900)])
+        .unwrap();
+    // Solving the near one exhausts the band the target sits in.
+    store.save_card("near", &rs_fsrs::Card::new()).unwrap();
+
+    let found = store
+        .unseen_near_rating(RATING_FLOOR, None)
+        .unwrap()
+        .expect("an unseen puzzle exists, so one must be served");
+    assert_eq!(found.id, "far");
+
+    // With the corpus genuinely solved out it must still terminate, and say so.
+    store.save_card("far", &rs_fsrs::Card::new()).unwrap();
+    assert!(store.unseen_near_rating(RATING_FLOOR, None).unwrap().is_none());
+}

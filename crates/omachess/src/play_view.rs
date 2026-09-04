@@ -891,6 +891,9 @@ impl PlayView {
         };
         let counts = analysis.counts();
         let record = omachess_core::store::GameRecord {
+            // Played here, so it is this machine's user regardless of the name
+            // a PGN import happens to have remembered.
+            player: String::new(),
             played_at: chrono::Utc::now(),
             player_white,
             opponent_elo: self.opponent_elo(),

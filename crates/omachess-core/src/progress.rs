@@ -290,7 +290,7 @@ impl PlayTrend {
 
 /// Compare the most recent half of games against the earlier half.
 pub fn play_trend(store: &Store) -> Result<Option<PlayTrend>> {
-    Ok(summarise_games(&store.games()?))
+    Ok(summarise_games(&store.games_mine()?))
 }
 
 fn summarise_games(games: &[GameRecord]) -> Option<PlayTrend> {
@@ -401,6 +401,7 @@ mod game_tests {
             inaccuracies: 0,
             source: String::new(),
             phases: [crate::store::PhaseLoss::UNKNOWN; 3],
+            player: String::new(),
         }
     }
 
@@ -534,7 +535,7 @@ pub struct GamePoint {
 
 pub fn game_points(store: &Store) -> Result<Vec<GamePoint>> {
     Ok(store
-        .games()?
+        .games_mine()?
         .into_iter()
         .map(|g| GamePoint {
             played_at: g.played_at,
