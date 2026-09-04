@@ -262,6 +262,29 @@ mod tests {
         assert_eq!(games[0].white, "c");
     }
 
+    /// Castling is written O-O in notation and stored as king-takes-rook
+    /// internally, so a game containing it is the one to check.
+    #[test]
+    fn castling_and_promotion_notation_survive_the_round_trip() {
+        let game = r#"[White "Morphy"]
+[Black "Duke"]
+[Result "1-0"]
+
+1. e4 e5 2. Nf3 d6 3. d4 Bg4 4. dxe5 Bxf3 5. Qxf3 dxe5 6. Bc4 Nf6 7. Qb3 Qe7
+8. Nc3 c6 9. Bg5 b5 10. Nxb5 cxb5 11. Bxb5+ Nbd7 12. O-O-O Rd8 13. Rxd7 Rxd7
+14. Rd1 Qe6 15. Bxd7+ Nxd7 16. Qb8+ Nxb8 17. Rd8# 1-0
+"#;
+        let games = read_all(game.as_bytes()).unwrap();
+        assert_eq!(games.len(), 1);
+        let moves = &games[0].moves;
+        assert_eq!(moves.len(), 33, "the whole game must replay");
+        assert!(
+            moves.contains(&"e1c1".to_string()),
+            "queenside castling should appear as the king's own move: {moves:?}"
+        );
+        assert_eq!(moves.last().map(String::as_str), Some("d1d8"), "the mate");
+    }
+
     #[test]
     fn an_empty_file_reads_as_no_games() {
         assert!(read_all(b"").unwrap().is_empty());

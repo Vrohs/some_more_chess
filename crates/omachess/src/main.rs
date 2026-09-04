@@ -6,6 +6,7 @@ mod engine_worker;
 mod pieces;
 mod play_view;
 mod sound;
+mod study_view;
 mod progress_view;
 mod style;
 mod trainer;
@@ -36,11 +37,12 @@ fn main() -> ExitCode {
         Some("export") => command_export(args.get(1).map(PathBuf::from)),
         Some("restore") => command_restore(args.get(1).map(PathBuf::from)),
         Some("import-pgn") => command_import_pgn(args.get(1).map(PathBuf::from), args.get(2)),
+        Some("study") => run_app(args.get(1).map(PathBuf::from)),
         Some("--help" | "-h") => {
             print_usage();
             Ok(())
         }
-        _ => run_app(),
+        _ => run_app(None),
     };
 
     match result {
@@ -64,6 +66,7 @@ USAGE:
     omachess games           Show how well you have been playing the engine
     omachess export <FILE>   Write your history to a file you can keep
     omachess restore <FILE>  Merge a history file back in
+    omachess study <FILE>    Open a PGN in the Study tab and step through it
     omachess import-pgn <FILE> [NAME]
                              Analyse your own games from a PGN export. NAME is
                              your username in the file; it is remembered.
@@ -404,19 +407,19 @@ fn parse_date(date: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::Utc.with_ymd_and_hms(year, month, day, 12, 0, 0).single()
 }
 
-fn run_app() -> anyhow::Result<()> {
+fn run_app(study: Option<PathBuf>) -> anyhow::Result<()> {
     // Fail before opening a window if the database is unusable.
     open_store()?;
 
     let app = adw::Application::builder().application_id(APP_ID).build();
-    app.connect_activate(|app| {
+    app.connect_activate(move |app| {
         // Activating an already-running instance must raise the window it has,
         // not build a second one against the same database.
         if let Some(window) = app.windows().first() {
             window.present();
             return;
         }
-        if let Err(e) = build_window(app) {
+        if let Err(e) = build_window(app, study.clone()) {
             eprintln!("omachess: {e:#}");
         }
     });
@@ -424,7 +427,7 @@ fn run_app() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_window(app: &adw::Application) -> anyhow::Result<()> {
+fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::Result<()> {
     style::install();
 
     let pieces = pieces::PieceSet::discover(&paths::pieces_dir()).map(Rc::new);
@@ -449,7 +452,8 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     }
 
     let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone());
-    let play = play_view::PlayView::new(store, pieces, sounds, engine);
+    let play = play_view::PlayView::new(store, pieces.clone(), sounds, engine.clone());
+    let study = study_view::StudyView::new(pieces, engine);
 
     let progress = progress_view::ProgressView::new();
     progress.refresh(&trainer.progress_data());
@@ -469,6 +473,12 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         "media-playback-start-symbolic",
     );
     stack.add_titled_with_icon(
+        study.widget(),
+        Some("study"),
+        "Study",
+        "accessories-text-editor-symbolic",
+    );
+    stack.add_titled_with_icon(
         &progress_page,
         Some("progress"),
         "Progress",
@@ -485,8 +495,9 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     {
         let trainer = trainer.clone();
         let play = play.clone();
+        let study = study.clone();
         stack.connect_visible_child_name_notify(move |stack| {
-            let _keep_alive = &play;
+            let _keep_alive = (&play, &study);
             if stack.visible_child_name().as_deref() == Some("progress") {
                 progress.refresh(&trainer.progress_data());
             }
@@ -516,5 +527,12 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         .build();
 
     window.present();
+
+    // A PGN named on the command line opens straight into the Study tab, so a
+    // game can be handed to the application from a terminal or a file manager.
+    if let Some(path) = study_file {
+        stack.set_visible_child_name("study");
+        study.open_path(&path);
+    }
     Ok(())
 }

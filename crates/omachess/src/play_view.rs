@@ -720,6 +720,8 @@ impl PlayView {
                         self.add_button.set_visible(false);
                     }
                 }
+                // Evaluations belong to the study view; play never asks for one.
+                Reply::Evaluation { .. } => {}
                 Reply::Failed(message) => {
                     self.thinking.set(false);
                     self.status.set_label(&format!("Engine: {message}"));

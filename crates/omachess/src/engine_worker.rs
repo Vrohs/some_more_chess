@@ -21,6 +21,15 @@ pub enum Request {
         moves: Vec<String>,
         elo: u32,
     },
+    /// Evaluate one position as deeply as asked, for studying a game.
+    Evaluate {
+        fen: String,
+        moves: Vec<String>,
+        depth: u32,
+        /// Echoed back, so a reply arriving after the board has moved on can
+        /// be discarded rather than shown against the wrong position.
+        token: u64,
+    },
     /// Review a finished game at full strength.
     Review {
         fen: String,
@@ -31,6 +40,11 @@ pub enum Request {
 
 pub enum Reply {
     Move(String),
+    /// An evaluation, tagged with the token of the request that asked for it.
+    Evaluation {
+        analysis: omachess_core::engine::Analysis,
+        token: u64,
+    },
     Review(GameAnalysis),
     Failed(String),
 }
@@ -111,6 +125,30 @@ impl EngineWorker {
                             Err(e) => {
                                 // A protocol error means the process is no
                                 // longer trustworthy; start a fresh one next time.
+                                engine = None;
+                                Reply::Failed(format!("{e:#}"))
+                            }
+                        }
+                    }
+                    Request::Evaluate {
+                        fen,
+                        moves,
+                        depth,
+                        token,
+                    } => {
+                        if current_elo.is_some() {
+                            match active.limit_strength(None) {
+                                Ok(()) => current_elo = None,
+                                Err(e) => {
+                                    engine = None;
+                                    let _ = reply_tx.send(Reply::Failed(format!("{e:#}")));
+                                    continue;
+                                }
+                            }
+                        }
+                        match active.analyse(&fen, &moves, Limit::Depth(depth)) {
+                            Ok(analysis) => Reply::Evaluation { analysis, token },
+                            Err(e) => {
                                 engine = None;
                                 Reply::Failed(format!("{e:#}"))
                             }
