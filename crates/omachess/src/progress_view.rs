@@ -7,13 +7,15 @@
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Label, Orientation};
 use omachess_core::progress::{
-    GamePoint, Improvement, PlayTrend, SlopePoint, MIN_GAMES, SIGNIFICANT,
+    GamePoint, Improvement, PlayTrend, SlopePoint, Transfer, MIN_GAMES, MIN_TRANSFER, SIGNIFICANT,
 };
+use omachess_core::store::MIN_REPEAT_HOURS;
 
 use crate::charts;
 
 /// Everything the page needs, gathered once.
 pub struct ProgressData {
+    pub transfer: Vec<Transfer>,
     pub overall: Option<Improvement>,
     pub bands: Vec<(u32, Improvement)>,
     pub solved: u64,
@@ -50,7 +52,33 @@ impl ProgressView {
             self.root.remove(&child);
         }
 
-        self.root.append(&section_title("Are you solving the same puzzles faster?"));
+        // Transfer leads, because it is the only figure that means "better at
+        // chess" rather than "better at these puzzles".
+        self.root
+            .append(&section_title("On puzzles you have never seen"));
+        self.root.append(&caption(
+            "Solving a fresh puzzle faster cannot be remembering it. Rating band is held fixed, \
+             so this compares puzzles of comparable difficulty rather than an easy run against \
+             a hard one. This is the marker that means you have improved at chess.",
+        ));
+        if data.transfer.is_empty() {
+            self.root.append(&caption(&format!(
+                "Not enough yet — {MIN_TRANSFER} first encounters are needed within a single \
+                 rating band before the earlier and later halves can be compared.",
+            )));
+        } else {
+            for transfer in &data.transfer {
+                self.root.append(&transfer_row(transfer));
+            }
+        }
+
+        self.root
+            .append(&section_title("On puzzles you had solved before"));
+        self.root.append(&caption(&format!(
+            "Retention, not skill: a puzzle re-solved quickly may simply be remembered. Only \
+             repeats at least {MIN_REPEAT_HOURS:.0} hours apart are counted, because anything \
+             sooner is recall of that position.",
+        )));
 
         match data.overall.as_ref() {
             Some(overall) => {
@@ -110,6 +138,60 @@ impl ProgressView {
 
         self.root.append(&method_note());
     }
+}
+
+/// One band's transfer result, stated with the evidence behind it.
+fn transfer_row(transfer: &Transfer) -> GtkBox {
+    let outer = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(2)
+        .build();
+
+    let improving = transfer.improvement() >= 0.0;
+    let headline = Label::builder()
+        .label(format!(
+            "{}–{}   {:.0}% {}",
+            transfer.band,
+            transfer.band + 99,
+            transfer.improvement().abs() * 100.0,
+            if improving { "faster" } else { "slower" }
+        ))
+        .halign(Align::Start)
+        .build();
+    headline.add_css_class("title-2");
+    headline.add_css_class("omachess-change");
+    headline.add_css_class(if improving { "improving" } else { "slowing" });
+
+    let detail = Label::builder()
+        .label(format!(
+            "{:.1}s → {:.1}s on {} unseen puzzles solved · accuracy {:.0}% → {:.0}% over {} seen\n{}",
+            transfer.earlier_seconds,
+            transfer.later_seconds,
+            transfer.solved,
+            transfer.earlier_accuracy * 100.0,
+            transfer.later_accuracy * 100.0,
+            transfer.seen,
+            if transfer.is_speed_accuracy_tradeoff() {
+                format!(
+                    "Faster, but you are getting more of them wrong — speed bought by guessing, \
+                     not earned. Slow down until accuracy recovers. (p = {:.3})",
+                    transfer.p_value
+                )
+            } else if transfer.is_significant() {
+                format!("Unlikely to be chance (p = {:.3}).", transfer.p_value)
+            } else {
+                format!("Not yet distinguishable from chance (p = {:.3}).", transfer.p_value)
+            }
+        ))
+        .halign(Align::Start)
+        .wrap(true)
+        .max_width_chars(74)
+        .build();
+    detail.add_css_class("dim-label");
+
+    outer.append(&headline);
+    outer.append(&detail);
+    outer
 }
 
 fn section_title(text: &str) -> Label {

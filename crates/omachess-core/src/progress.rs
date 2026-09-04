@@ -12,7 +12,11 @@
 use anyhow::Result;
 use chrono::Duration;
 
-use crate::store::{GameRecord, PairedSolve, Store};
+use crate::store::{FirstAttempt, GameRecord, PairedSolve, Store};
+
+/// First encounters needed in a band before its transfer figure is reported.
+/// Each half must be big enough for the comparison to mean anything.
+pub const MIN_TRANSFER: usize = 12;
 
 /// Repeated puzzles required before any claim is made at all.
 pub const MIN_PAIRS: usize = 5;
@@ -554,7 +558,9 @@ mod series_tests {
             store
                 .record_attempt(&AttemptRecord {
                     puzzle_id: (*id).to_owned(),
-                    reviewed_at: base + Duration::minutes(i as i64),
+                    // Spaced past the repeat threshold, so these exercise the
+                    // series shapes rather than the interval rule.
+                    reviewed_at: base + Duration::hours(i as i64 * 25),
                     elapsed: Duration::seconds(*secs),
                     correct: *correct,
                     grade: if *correct { Rating::Good } else { Rating::Again },
@@ -637,5 +643,291 @@ mod series_tests {
         assert!(slope_points(&store).unwrap().is_empty());
         assert!(rating_history(&store).unwrap().is_empty());
         assert!(game_points(&store).unwrap().is_empty());
+    }
+}
+
+
+/// Whether the solver has got faster on puzzles they had **never seen**.
+///
+/// This is the marker that actually means "better at chess". Re-solving a
+/// puzzle faster can be recall of that position; solving a fresh one faster
+/// cannot be. Rating band is held fixed so the comparison is between puzzles of
+/// comparable difficulty rather than between an easy run and a hard one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transfer {
+    pub band: u32,
+    /// Unseen puzzles in this band that were solved correctly.
+    pub solved: usize,
+    /// Every first encounter in the band, solved or not.
+    pub seen: usize,
+    pub earlier_seconds: f64,
+    pub later_seconds: f64,
+    pub earlier_accuracy: f64,
+    pub later_accuracy: f64,
+    /// One-sided probability that the later half is not faster.
+    pub p_value: f64,
+}
+
+impl Transfer {
+    pub fn is_significant(&self) -> bool {
+        self.p_value <= SIGNIFICANT
+    }
+
+    /// Faster but less accurate — speed bought by guessing rather than earned.
+    ///
+    /// Reporting the speed gain alone would be flattering and wrong: solving
+    /// quicker while getting more of them wrong is a worse result, not a better
+    /// one, and it is the most common way a solver fools themselves.
+    pub fn is_speed_accuracy_tradeoff(&self) -> bool {
+        self.improvement() > 0.0 && self.later_accuracy + 0.05 < self.earlier_accuracy
+    }
+
+    /// Fraction faster; positive is an improvement.
+    pub fn improvement(&self) -> f64 {
+        if self.earlier_seconds <= 0.0 {
+            return 0.0;
+        }
+        (self.earlier_seconds - self.later_seconds) / self.earlier_seconds
+    }
+}
+
+/// Transfer per rating band, best-evidenced band first.
+///
+/// Deliberately not aggregated across bands: as the solver improves they are
+/// served harder puzzles, so a pooled figure would mix a change in skill with a
+/// change in difficulty.
+pub fn transfer_by_band(store: &Store) -> Result<Vec<Transfer>> {
+    let attempts = store.first_attempts()?;
+    let mut bands: Vec<u32> = attempts.iter().map(|a| a.band).collect();
+    bands.sort_unstable();
+    bands.dedup();
+
+    let mut out: Vec<Transfer> = bands
+        .into_iter()
+        .filter_map(|band| {
+            let subset: Vec<&FirstAttempt> =
+                attempts.iter().filter(|a| a.band == band).collect();
+            summarise_transfer(band, &subset)
+        })
+        .collect();
+    out.sort_by_key(|t| std::cmp::Reverse(t.solved));
+    Ok(out)
+}
+
+fn summarise_transfer(band: u32, attempts: &[&FirstAttempt]) -> Option<Transfer> {
+    if attempts.len() < MIN_TRANSFER {
+        return None;
+    }
+    let split = attempts.len() / 2;
+    let (earlier, later) = attempts.split_at(split);
+
+    // Only correct attempts are timed: a fast wrong answer is not fluency.
+    let times = |set: &[&FirstAttempt]| -> Vec<f64> {
+        set.iter()
+            .filter(|a| a.correct)
+            .map(|a| a.elapsed.num_milliseconds() as f64 / 1000.0)
+            .collect()
+    };
+    let accuracy = |set: &[&FirstAttempt]| -> f64 {
+        if set.is_empty() {
+            return 0.0;
+        }
+        set.iter().filter(|a| a.correct).count() as f64 / set.len() as f64
+    };
+
+    let earlier_times = times(earlier);
+    let later_times = times(later);
+    if earlier_times.is_empty() || later_times.is_empty() {
+        return None;
+    }
+
+    Some(Transfer {
+        band,
+        solved: earlier_times.len() + later_times.len(),
+        seen: attempts.len(),
+        earlier_seconds: median_of(&earlier_times),
+        later_seconds: median_of(&later_times),
+        earlier_accuracy: accuracy(earlier),
+        later_accuracy: accuracy(later),
+        // Faster means smaller, so the test asks whether the earlier times are
+        // the larger sample.
+        p_value: mann_whitney_greater(&earlier_times, &later_times),
+    })
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+    use crate::store::AttemptRecord;
+    use chrono::{Duration, TimeZone, Utc};
+    use rs_fsrs::Rating;
+
+    fn store_with(seconds: &[(i64, bool)]) -> Store {
+        let store = Store::in_memory().unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap();
+        for (i, (secs, correct)) in seconds.iter().enumerate() {
+            store
+                .record_attempt(&AttemptRecord {
+                    puzzle_id: format!("p{i:03}"),
+                    reviewed_at: base + Duration::hours(i as i64),
+                    elapsed: Duration::seconds(*secs),
+                    correct: *correct,
+                    grade: if *correct { Rating::Good } else { Rating::Again },
+                    puzzle_rating: 1150,
+                })
+                .unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn nothing_is_claimed_from_too_few_fresh_puzzles() {
+        let few: Vec<(i64, bool)> = (0..MIN_TRANSFER - 1).map(|_| (30, true)).collect();
+        assert!(transfer_by_band(&store_with(&few)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn getting_faster_on_unseen_puzzles_is_detected() {
+        let mut runs: Vec<(i64, bool)> = (0..8).map(|_| (40, true)).collect();
+        runs.extend((0..8).map(|_| (15, true)));
+        let result = &transfer_by_band(&store_with(&runs)).unwrap()[0];
+        assert!(result.later_seconds < result.earlier_seconds);
+        assert!(result.is_significant(), "p was {}", result.p_value);
+        assert!(result.improvement() > 0.5);
+    }
+
+    #[test]
+    fn no_change_on_unseen_puzzles_is_not_called_progress() {
+        let flat: Vec<(i64, bool)> = (0..16).map(|i| (30 + (i % 3), true)).collect();
+        let result = &transfer_by_band(&store_with(&flat)).unwrap()[0];
+        assert!(!result.is_significant(), "p was {}", result.p_value);
+    }
+
+    #[test]
+    fn getting_slower_on_unseen_puzzles_is_never_significant() {
+        let mut runs: Vec<(i64, bool)> = (0..8).map(|_| (15, true)).collect();
+        runs.extend((0..8).map(|_| (40, true)));
+        let result = &transfer_by_band(&store_with(&runs)).unwrap()[0];
+        assert!(result.later_seconds > result.earlier_seconds);
+        assert!(!result.is_significant());
+        assert!(result.improvement() < 0.0);
+    }
+
+    #[test]
+    fn wrong_answers_count_against_accuracy_but_are_not_timed() {
+        let mut runs: Vec<(i64, bool)> = (0..8).map(|_| (30, true)).collect();
+        // Later half: half of them missed, and missed quickly.
+        runs.extend((0..4).map(|_| (2, false)));
+        runs.extend((0..4).map(|_| (30, true)));
+        let result = &transfer_by_band(&store_with(&runs)).unwrap()[0];
+        assert!(
+            result.later_accuracy < result.earlier_accuracy,
+            "accuracy should fall: {} vs {}",
+            result.earlier_accuracy,
+            result.later_accuracy
+        );
+        assert!(
+            (result.later_seconds - 30.0).abs() < 1e-9,
+            "the 2s misses must not be timed, got {}",
+            result.later_seconds
+        );
+    }
+
+    #[test]
+    fn speed_bought_by_guessing_is_named_as_such() {
+        let mut runs: Vec<(i64, bool)> = (0..8).map(|_| (40, true)).collect();
+        // Later half: much faster, but half of them wrong.
+        runs.extend((0..4).map(|_| (10, true)));
+        runs.extend((0..4).map(|_| (5, false)));
+        let result = &transfer_by_band(&store_with(&runs)).unwrap()[0];
+        assert!(result.improvement() > 0.0, "it did get faster");
+        assert!(
+            result.is_speed_accuracy_tradeoff(),
+            "faster with accuracy {:.2} -> {:.2} must be flagged",
+            result.earlier_accuracy,
+            result.later_accuracy
+        );
+    }
+
+    #[test]
+    fn getting_faster_without_losing_accuracy_is_not_flagged() {
+        let mut runs: Vec<(i64, bool)> = (0..8).map(|_| (40, true)).collect();
+        runs.extend((0..8).map(|_| (15, true)));
+        let result = &transfer_by_band(&store_with(&runs)).unwrap()[0];
+        assert!(!result.is_speed_accuracy_tradeoff());
+    }
+
+    #[test]
+    fn getting_slower_is_never_a_tradeoff() {
+        let mut runs: Vec<(i64, bool)> = (0..8).map(|_| (15, true)).collect();
+        runs.extend((0..8).map(|_| (40, true)));
+        let result = &transfer_by_band(&store_with(&runs)).unwrap()[0];
+        assert!(!result.is_speed_accuracy_tradeoff());
+    }
+
+    #[test]
+    fn a_band_with_no_correct_answers_reports_nothing() {
+        let none: Vec<(i64, bool)> = (0..16).map(|_| (30, false)).collect();
+        assert!(transfer_by_band(&store_with(&none)).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::*;
+    use crate::store::{AttemptRecord, MIN_REPEAT_HOURS};
+    use chrono::{Duration, TimeZone, Utc};
+    use rs_fsrs::Rating;
+
+    fn solve(store: &Store, id: &str, at: chrono::DateTime<Utc>, secs: i64) {
+        store
+            .record_attempt(&AttemptRecord {
+                puzzle_id: id.to_owned(),
+                reviewed_at: at,
+                elapsed: Duration::seconds(secs),
+                correct: true,
+                grade: Rating::Good,
+                puzzle_rating: 1150,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_repeat_on_the_same_day_is_not_counted_as_measurement() {
+        let store = Store::in_memory().unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap();
+        solve(&store, "a", base, 40);
+        solve(&store, "a", base + Duration::minutes(18), 8);
+        assert!(
+            store.paired_solves().unwrap().is_empty(),
+            "solving it again eighteen minutes later is recall, not skill"
+        );
+    }
+
+    #[test]
+    fn a_repeat_the_next_day_is_counted() {
+        let store = Store::in_memory().unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap();
+        solve(&store, "a", base, 40);
+        solve(&store, "a", base + Duration::hours(MIN_REPEAT_HOURS as i64 + 1), 20);
+        assert_eq!(store.paired_solves().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_boundary_is_where_it_says_it_is() {
+        let store = Store::in_memory().unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap();
+        solve(&store, "early", base, 40);
+        solve(&store, "early", base + Duration::minutes((MIN_REPEAT_HOURS * 60.0) as i64 - 5), 20);
+        solve(&store, "late", base, 40);
+        solve(&store, "late", base + Duration::minutes((MIN_REPEAT_HOURS * 60.0) as i64 + 5), 20);
+
+        let ids: Vec<String> = store
+            .paired_solves()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.puzzle_id)
+            .collect();
+        assert_eq!(ids, vec!["late"], "only the one past the threshold counts");
     }
 }

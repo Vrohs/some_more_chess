@@ -91,8 +91,23 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 "#;
 
-/// One puzzle solved correctly more than once: the only comparison that
-/// measures a person rather than a puzzle.
+/// A repeat sooner than this is recall of a specific position, not evidence of
+/// skill: you remember the puzzle you saw this morning. Only re-solves at least
+/// this far apart are counted as measurement.
+pub const MIN_REPEAT_HOURS: f64 = 20.0;
+
+/// A puzzle's first encounter, which is the only unrehearsed one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FirstAttempt {
+    pub puzzle_id: String,
+    pub band: u32,
+    pub at: DateTime<Utc>,
+    pub elapsed: Duration,
+    pub correct: bool,
+}
+
+/// One puzzle solved correctly more than once, far enough apart to mean
+/// something: the only comparison that measures a person rather than a puzzle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PairedSolve {
     pub puzzle_id: String,
@@ -491,7 +506,7 @@ impl Store {
     pub fn paired_solves(&self) -> Result<Vec<PairedSolve>> {
         let mut stmt = self.conn.prepare_cached(
             "WITH ok AS (
-                 SELECT puzzle_id, elapsed_ms, band,
+                 SELECT puzzle_id, elapsed_ms, band, reviewed_at,
                         ROW_NUMBER() OVER (PARTITION BY puzzle_id ORDER BY reviewed_at ASC)  AS first_rank,
                         ROW_NUMBER() OVER (PARTITION BY puzzle_id ORDER BY reviewed_at DESC) AS last_rank,
                         COUNT(*)   OVER (PARTITION BY puzzle_id)                             AS solves
@@ -501,9 +516,11 @@ impl Store {
              SELECT f.puzzle_id, f.band, f.elapsed_ms, l.elapsed_ms, f.solves
              FROM ok f
              JOIN ok l ON l.puzzle_id = f.puzzle_id AND l.last_rank = 1
-             WHERE f.first_rank = 1 AND f.solves >= 2",
+             WHERE f.first_rank = 1
+               AND f.solves >= 2
+               AND (julianday(l.reviewed_at) - julianday(f.reviewed_at)) * 24.0 >= ?1",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map(params![MIN_REPEAT_HOURS], |r| {
             Ok(PairedSolve {
                 puzzle_id: r.get(0)?,
                 band: r.get(1)?,
@@ -523,6 +540,33 @@ impl Store {
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The first time each puzzle was seen, oldest first.
+    ///
+    /// A first encounter cannot be remembered, so solve times across these
+    /// measure whether the solver has actually got quicker at puzzles rather
+    /// than quicker at these puzzles.
+    pub fn first_attempts(&self) -> Result<Vec<FirstAttempt>> {
+        let mut stmt = self.conn.prepare_cached(
+            "WITH ranked AS (
+                 SELECT puzzle_id, band, reviewed_at, elapsed_ms, correct,
+                        ROW_NUMBER() OVER (PARTITION BY puzzle_id ORDER BY reviewed_at ASC) AS rank
+                 FROM attempts
+             )
+             SELECT puzzle_id, band, reviewed_at, elapsed_ms, correct
+             FROM ranked WHERE rank = 1 ORDER BY reviewed_at ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(FirstAttempt {
+                puzzle_id: r.get(0)?,
+                band: r.get(1)?,
+                at: r.get(2)?,
+                elapsed: Duration::milliseconds(r.get(3)?),
+                correct: r.get::<_, i64>(4)? != 0,
+            })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }

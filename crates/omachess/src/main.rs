@@ -109,7 +109,10 @@ fn command_status() -> anyhow::Result<()> {
 }
 
 fn command_progress() -> anyhow::Result<()> {
-    use omachess_core::progress::{improvement_by_band, measured_improvement};
+    use omachess_core::progress::{
+        improvement_by_band, measured_improvement, transfer_by_band, MIN_TRANSFER,
+    };
+    use omachess_core::store::MIN_REPEAT_HOURS;
 
     let store = open_store()?;
     let seconds = |d: chrono::Duration| d.num_milliseconds() as f64 / 1000.0;
@@ -120,10 +123,39 @@ fn command_progress() -> anyhow::Result<()> {
     );
     println!("solved     {} distinct puzzles", store.solved_count()?);
 
+    println!("\n-- unseen puzzles (does this mean better at chess?) --");
+    let transfer = transfer_by_band(&store)?;
+    if transfer.is_empty() {
+        println!(
+            "  nothing yet: {MIN_TRANSFER} first encounters are needed in one rating band"
+        );
+    }
+    for t in &transfer {
+        println!(
+            "  {}-{}  {:>5.1}s -> {:>5.1}s  {:>4.0}% {}  accuracy {:.0}% -> {:.0}%  (p = {:.3}, {} solved)",
+            t.band,
+            t.band + 99,
+            t.earlier_seconds,
+            t.later_seconds,
+            t.improvement().abs() * 100.0,
+            if t.improvement() >= 0.0 { "faster" } else { "slower" },
+            t.earlier_accuracy * 100.0,
+            t.later_accuracy * 100.0,
+            t.p_value,
+            t.solved,
+        );
+        if t.is_speed_accuracy_tradeoff() {
+            println!("      ^ faster but less accurate: speed bought by guessing, not earned");
+        }
+    }
+
+    println!(
+        "\n-- repeated puzzles (retention; only repeats {MIN_REPEAT_HOURS:.0}h+ apart count) --"
+    );
     let Some(overall) = measured_improvement(&store)? else {
         println!(
-            "\nNothing measured yet. Progress is only computed from puzzles solved more\n\
-             than once, so turn on Repeat in the Train tab and re-solve some."
+            "  nothing yet: a puzzle re-solved sooner than {MIN_REPEAT_HOURS:.0} hours after the\n\
+             first is recall of that position, not evidence of skill, so it is not counted."
         );
         return Ok(());
     };

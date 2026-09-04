@@ -226,6 +226,7 @@ impl Trainer {
         use omachess_core::progress as p;
         let store = self.store.borrow();
         ProgressData {
+            transfer: p::transfer_by_band(&store).unwrap_or_default(),
             overall: p::measured_improvement(&store).unwrap_or_default(),
             bands: p::improvement_by_band(&store).unwrap_or_default(),
             solved: store.solved_count().unwrap_or(0),
