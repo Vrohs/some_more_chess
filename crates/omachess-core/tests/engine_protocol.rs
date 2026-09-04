@@ -209,7 +209,7 @@ fn a_reasonable_opening_produces_no_blunders() {
 fn play_out(engine: &mut Engine, fen: &str, movetime: Duration) -> Option<Option<shakmaty::Color>> {
     use omachess_core::endgame::conclusion;
     use omachess_core::game::{find_move, Game};
-    use shakmaty::{uci::UciMove, Color, Position};
+    use shakmaty::{uci::UciMove, Color};
 
     let mut game = Game::from_fen(Color::White, fen)?;
     for _ in 0..300 {

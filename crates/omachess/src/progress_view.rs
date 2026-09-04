@@ -7,7 +7,7 @@
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Label, Orientation};
 use omachess_core::progress::{
-    GamePoint, Improvement, PlayTrend, SlopePoint, Transfer, Weakness, MIN_GAMES,
+    EndgameRecord, GamePoint, Improvement, PlayTrend, SlopePoint, Transfer, Weakness, MIN_GAMES,
     MIN_RATING_POINTS, MIN_THEME_ATTEMPTS, MIN_TRANSFER, SIGNIFICANT,
 };
 use omachess_core::store::MIN_REPEAT_HOURS;
@@ -26,6 +26,7 @@ pub struct ProgressData {
     pub ratings: Vec<f64>,
     pub games: Vec<GamePoint>,
     pub play: Option<PlayTrend>,
+    pub endgames: Vec<EndgameRecord>,
     pub repeat_mode: bool,
 }
 
@@ -130,6 +131,35 @@ impl ProgressView {
                 self.root.append(&band_row(*band, improvement));
             }
         }
+
+        self.root.append(&section_title("Endgames converted"));
+        if data.endgames.is_empty() {
+            self.root.append(&caption(
+                "Nothing attempted yet. These are the only positions here with a settled answer: \
+                 a tablebase says the result, so converting one is evidence that does not depend \
+                 on an opponent, a rating pool or a search depth.",
+            ));
+        } else {
+            self.root.append(&caption(
+                "A tablebase settled each of these before it was offered, and the engine defends \
+                 uncapped. Nothing else on this page is this hard to argue with.",
+            ));
+            for record in &data.endgames {
+                self.root.append(&endgame_row(record));
+            }
+        }
+
+        self.root
+            .append(&section_title("What these numbers are not"));
+        self.root.append(&caption(
+            "Three different numbers here look like ratings and none of them are on the same \
+             scale. The puzzle rating below is a difficulty level borrowed from Lichess's puzzle \
+             pool. The engine rating further down is how strong an opponent you are holding. \
+             Neither is your Lichess or Chess.com rating, and those two are not each other \
+             either — the same player typically reads two to four hundred points lower on \
+             Chess.com than on Lichess, because they are separate pools with separate formulas. \
+             Compare each number only against its own history.",
+        ));
 
         self.root.append(&section_title("Puzzle rating"));
         if data.ratings.len() < MIN_RATING_POINTS {
@@ -241,6 +271,43 @@ fn weakness_row(weakness: &Weakness, baseline: f64) -> Label {
         .build();
     label.add_css_class("monospace");
     label
+}
+
+/// One endgame's conversion record.
+fn endgame_row(record: &EndgameRecord) -> GtkBox {
+    let row = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(10)
+        .build();
+
+    let name = Label::builder()
+        .label(record.name)
+        .halign(Align::Start)
+        .hexpand(true)
+        .wrap(true)
+        .build();
+    row.append(&name);
+
+    let objective = Label::builder()
+        .label(record.objective.label())
+        .halign(Align::End)
+        .build();
+    objective.add_css_class("dim-label");
+    row.append(&objective);
+
+    let score = Label::builder()
+        .label(format!("{} / {}", record.achieved, record.attempts))
+        .halign(Align::End)
+        .build();
+    // The most recent attempt is what the player is actually able to do now,
+    // so it is coloured rather than the average.
+    match record.last_achieved {
+        Some(true) => score.add_css_class("success"),
+        Some(false) => score.add_css_class("error"),
+        None => {}
+    }
+    row.append(&score);
+    row
 }
 
 fn section_title(text: &str) -> Label {

@@ -1049,6 +1049,53 @@ pub const WEAKNESS_MARGIN: f64 = 0.10;
 
 /// Themes the solver handles worse than they handle puzzles generally, worst
 /// first, together with the baseline they are being judged against.
+/// How a studied endgame has gone: attempts, conversions, and whether the most
+/// recent attempt succeeded.
+pub struct EndgameRecord {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub objective: crate::endgame::Objective,
+    pub attempts: u32,
+    pub achieved: u32,
+    pub last_achieved: Option<bool>,
+}
+
+impl EndgameRecord {
+    pub fn rate(&self) -> f64 {
+        if self.attempts == 0 {
+            return 0.0;
+        }
+        f64::from(self.achieved) / f64::from(self.attempts)
+    }
+}
+
+/// Conversion record for every endgame that has been attempted at least once.
+///
+/// Unattempted ones are left out: a list of zeroes is not a measurement, and
+/// the page is for things that have actually been tried.
+pub fn endgame_records(store: &Store) -> Result<Vec<EndgameRecord>> {
+    let attempts = store.endgame_attempts()?;
+    let mut out = Vec::new();
+    for entry in crate::endgame::ENDGAMES {
+        let mine: Vec<_> = attempts
+            .iter()
+            .filter(|(key, _, _)| key == entry.key)
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
+        out.push(EndgameRecord {
+            key: entry.key,
+            name: entry.name,
+            objective: entry.objective,
+            attempts: mine.len() as u32,
+            achieved: mine.iter().filter(|(_, _, ok)| *ok).count() as u32,
+            last_achieved: mine.last().map(|(_, _, ok)| *ok),
+        });
+    }
+    Ok(out)
+}
+
 pub fn recurring_weaknesses(store: &Store) -> Result<(Vec<Weakness>, f64)> {
     let baseline = store.overall_success()?;
     let mut weak: Vec<Weakness> = store
