@@ -1,0 +1,7 @@
+# Development-only files are kept out of the release tarball. A shipped
+# .mise.toml breaks the package build on any machine that has mise installed:
+# its shimmed cargo refuses to run inside an untrusted extracted directory.
+.mise.toml      export-ignore
+.gitattributes  export-ignore
+.github         export-ignore
+scripts         export-ignore

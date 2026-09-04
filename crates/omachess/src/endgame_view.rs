@@ -414,3 +414,66 @@ impl EndgameView {
         self.judge();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omachess_core::endgame::{conclusion, find, moves_until_fifty};
+    use omachess_core::game::Game;
+    use shakmaty::fen::Fen;
+    use shakmaty::CastlingMode;
+
+    fn position(fen: &str) -> shakmaty::Chess {
+        fen.parse::<Fen>()
+            .unwrap()
+            .into_position(CastlingMode::Standard)
+            .unwrap()
+    }
+
+    /// Every entry has to be loadable as a game the player can move in, or the
+    /// picker would offer a position that cannot be started.
+    #[test]
+    fn every_entry_loads_as_a_playable_game() {
+        for entry in ENDGAMES {
+            let game = Game::from_fen(Color::White, entry.fen)
+                .unwrap_or_else(|| panic!("{} would not load", entry.key));
+            assert_eq!(game.position().turn(), Color::White);
+            assert!(
+                !game.position().legal_moves().is_empty(),
+                "{}: nothing to play",
+                entry.key
+            );
+        }
+    }
+
+    /// The status line has to distinguish holding a draw from failing to win,
+    /// because they are the same result and opposite outcomes.
+    #[test]
+    fn the_same_result_reads_differently_against_different_objectives() {
+        let win = find("lucena").unwrap();
+        let hold = find("kp-drawn").unwrap();
+
+        assert_eq!(
+            win.judge(None),
+            Outcome::Failed,
+            "a draw loses a won position"
+        );
+        assert_eq!(
+            hold.judge(None),
+            Outcome::Achieved,
+            "a draw holds a level one"
+        );
+    }
+
+    /// The countdown is what the defender is playing towards and the attacker
+    /// is racing, so it has to fall as moves are made.
+    #[test]
+    fn the_fifty_move_countdown_falls() {
+        let fresh = position(find("lucena").unwrap().fen);
+        assert_eq!(moves_until_fifty(&fresh), 50);
+
+        let late = position("8/8/8/4k3/8/8/8/1NB1K3 w - - 90 60");
+        assert_eq!(moves_until_fifty(&late), 5);
+        assert_eq!(conclusion(&late), None, "still playable");
+    }
+}

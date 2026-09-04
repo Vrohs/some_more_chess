@@ -4,16 +4,23 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Chess study with spaced repetition and solve-time tracking"
 arch=('x86_64' 'aarch64')
-url="https://github.com/Vrohs/omachess"
+url="https://github.com/Vrohs/some_more_chess"
 license=('MIT')
 depends=('gtk4' 'libadwaita')
 makedepends=('cargo')
+# SQLite is compiled in from source by rusqlite's bundled feature. Arch enables
+# LTO by default, and the C objects cc produces then carry bitcode the Rust
+# linker cannot resolve, so every sqlite3_* symbol comes out undefined.
+options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
     cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
+    # Belt and braces: the release tarball excludes this, but a build from a
+    # working tree would otherwise hit mise's untrusted-config refusal.
+    rm -f .mise.toml
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
@@ -21,7 +28,7 @@ build() {
     cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
-    cargo build --frozen --release --all-features
+    cargo build --frozen --release
 }
 
 check() {
