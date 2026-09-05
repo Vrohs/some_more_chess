@@ -95,10 +95,16 @@ impl EndgameView {
         let start = Button::with_label("Begin");
         start.add_css_class("suggested-action");
 
+        // Stacked, not side by side. The picker's label is a whole sentence —
+        // a date, a phase and a cost — and next to it the Begin button was
+        // pushed off the edge of the window, which made the entire tab
+        // unusable: the board was there and nothing could start it.
         let controls = GtkBox::builder()
-            .orientation(Orientation::Horizontal)
+            .orientation(Orientation::Vertical)
             .spacing(8)
             .build();
+        picker.set_hexpand(true);
+        start.set_halign(Align::Start);
         controls.append(&picker);
         controls.append(&start);
 

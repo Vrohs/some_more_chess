@@ -101,6 +101,18 @@ pub fn brief(origin: &DrillOrigin) -> String {
     )
 }
 
+/// The position a drill is played out from.
+///
+/// A puzzle built from a mistake stores the position before the opponent's
+/// last move, then that move, then the answer. The drill wants the position
+/// the player was actually sitting at — after the opponent moved, with the
+/// mistake still ahead of them — which is one move in.
+pub fn position_to_play(puzzle: &crate::puzzle::Puzzle) -> Option<String> {
+    let setup = puzzle.moves.first()?;
+    let position = crate::drill::position_after(&puzzle.fen, setup)?;
+    Some(shakmaty::fen::Fen::from_position(&position, shakmaty::EnPassantMode::Legal).to_string())
+}
+
 /// Whether a played-out drill met its objective. `winner` is `None` for a draw.
 pub fn judge(objective: Objective, player: Color, winner: Option<Color>) -> bool {
     match objective {
@@ -181,6 +193,33 @@ mod tests {
             (at(30), false),
             (at(60), false)
         ]));
+    }
+
+    /// The drill must start where the player was sitting — after the
+    /// opponent's move, with the mistake still ahead of them — not one move
+    /// earlier, which would hand them a different decision entirely.
+    #[test]
+    fn a_drill_starts_where_the_player_actually_was() {
+        let puzzle = crate::puzzle::Puzzle {
+            id: "x".into(),
+            // Black to move; the stored line is the opponent's move and then
+            // the answer that was missed.
+            fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1".into(),
+            moves: vec!["e7e5".into(), "g1f3".into()],
+            rating: 1200,
+            rating_deviation: 0,
+            popularity: 0,
+            nb_plays: 0,
+            themes: vec![],
+            game_url: String::new(),
+            opening_tags: vec![],
+        };
+        let fen = position_to_play(&puzzle).expect("a playable position");
+        // After 1.e4 e5 it is White to move, which is the side that erred.
+        assert!(
+            fen.starts_with("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w"),
+            "{fen}"
+        );
     }
 
     #[test]

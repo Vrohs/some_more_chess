@@ -104,10 +104,16 @@ impl DrillView {
         let start = Button::with_label("Begin");
         start.add_css_class("suggested-action");
 
+        // Stacked, not side by side. The picker's label is a whole sentence —
+        // a date, a phase and a cost — and next to it the Begin button was
+        // pushed off the edge of the window, which made the entire tab
+        // unusable: the board was there and nothing could start it.
         let controls = GtkBox::builder()
-            .orientation(Orientation::Horizontal)
+            .orientation(Orientation::Vertical)
             .spacing(8)
             .build();
+        picker.set_hexpand(true);
+        start.set_halign(Align::Start);
         controls.append(&picker);
         controls.append(&start);
 
@@ -244,7 +250,7 @@ impl DrillView {
             let Some(puzzle) = self.store.borrow().puzzle(&id).ok().flatten() else {
                 continue;
             };
-            let Some(fen) = position_before(&puzzle) else {
+            let Some(fen) = omachess_core::playout::position_to_play(&puzzle) else {
                 continue;
             };
             labels.push(format!(
@@ -644,50 +650,5 @@ impl DrillView {
 
         self.update_countdown();
         self.judge();
-    }
-}
-
-/// The position a drill is played out from.
-///
-/// A puzzle built from a mistake stores the position before the opponent's
-/// last move, then that move, then the answer. The drill wants the position
-/// the player was actually sitting at — after the opponent moved, before they
-/// replied — which is one move in.
-fn position_before(puzzle: &omachess_core::puzzle::Puzzle) -> Option<String> {
-    let setup = puzzle.moves.first()?;
-    let position = omachess_core::drill::position_after(&puzzle.fen, setup)?;
-    Some(shakmaty::fen::Fen::from_position(&position, shakmaty::EnPassantMode::Legal).to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use omachess_core::puzzle::Puzzle;
-
-    /// The drill must start where the player was sitting — after the
-    /// opponent's move, with the mistake still ahead of them — not one move
-    /// earlier, which would hand them a different decision entirely.
-    #[test]
-    fn a_drill_starts_where_the_player_actually_was() {
-        let puzzle = Puzzle {
-            id: "x".into(),
-            // Black to move; the stored line is the opponent's move then the
-            // answer that was missed.
-            fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1".into(),
-            moves: vec!["e7e5".into(), "g1f3".into()],
-            rating: 1200,
-            rating_deviation: 0,
-            popularity: 0,
-            nb_plays: 0,
-            themes: vec![],
-            game_url: String::new(),
-            opening_tags: vec![],
-        };
-        let fen = position_before(&puzzle).expect("a playable position");
-        // After 1.e4 e5 it is White to move, which is the side that erred.
-        assert!(
-            fen.starts_with("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w"),
-            "{fen}"
-        );
     }
 }

@@ -451,6 +451,26 @@ fn command_doctor() -> anyhow::Result<()> {
         }
     }
 
+    // Whether the drill tab has anything it can actually put on a board. A
+    // position that will not set up is invisible from the interface: the list
+    // is simply shorter, with nothing said about why.
+    let offered = store.drills_to_play(1000)?;
+    let mut playable = 0;
+    let mut unplayable = Vec::new();
+    for (id, _) in &offered {
+        match store.puzzle(id)? {
+            Some(puzzle) => match omachess_core::playout::position_to_play(&puzzle) {
+                Some(_) => playable += 1,
+                None => unplayable.push(format!("{id} (position will not set up)")),
+            },
+            None => unplayable.push(format!("{id} (no puzzle behind it)")),
+        }
+    }
+    println!("  drills: {playable} of {} ready to play", offered.len());
+    for complaint in unplayable.iter().take(5) {
+        println!("    broken: {complaint}");
+    }
+
     let by_position = store.by_position_in_session()?;
     if by_position.is_empty() {
         println!("  no sittings recorded yet");
@@ -927,6 +947,18 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
 
     // A PGN named on the command line opens straight into the Study tab, so a
     // game can be handed to the application from a terminal or a file manager.
+    // Opening straight on a tab, so a fault in one can be looked at without
+    // needing a mouse to reach it.
+    if let Ok(tab) = std::env::var("OMACHESS_TAB") {
+        stack.set_visible_child_name(&tab);
+        if tab == "drill" {
+            drills.reload();
+        }
+        if tab == "play" {
+            play.refresh_openings();
+        }
+    }
+
     if let Some(path) = study_file {
         stack.set_visible_child_name("study");
         study.open_path(&path);
