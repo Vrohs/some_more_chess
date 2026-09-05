@@ -6,6 +6,7 @@
 
 pub mod backup;
 pub mod clock;
+pub mod diagnostics;
 pub mod drill;
 pub mod endgame;
 pub mod engine;

@@ -595,6 +595,8 @@ mod series_tests {
                         Rating::Again
                     },
                     puzzle_rating: *rating,
+                    session_id: None,
+                    index_in_session: 0,
                 })
                 .unwrap();
         }
@@ -813,6 +815,8 @@ mod transfer_tests {
                         Rating::Again
                     },
                     puzzle_rating: 1150,
+                    session_id: None,
+                    index_in_session: 0,
                 })
                 .unwrap();
         }
@@ -955,6 +959,8 @@ mod interval_tests {
                 correct: true,
                 grade: Rating::Good,
                 puzzle_rating: 1150,
+                session_id: None,
+                index_in_session: 0,
             })
             .unwrap();
     }
@@ -1054,6 +1060,33 @@ pub const WEAKNESS_MARGIN: f64 = 0.10;
 
 /// Themes the solver handles worse than they handle puzzles generally, worst
 /// first, together with the baseline they are being judged against.
+/// The fewest solves in a sitting before it can be judged as it runs. Two
+/// halves of four apiece is the smallest split worth comparing.
+pub const MIN_SITTING_SOLVES: usize = 8;
+
+/// How much worse the second half of a sitting has to be before saying so.
+/// Below this it is ordinary variation, and stopping someone mid-session on
+/// noise trains nothing but distrust of the advice.
+pub const FATIGUE_DROP: f64 = 0.25;
+
+/// Whether this sitting has gone downhill: the accuracy of its first half
+/// against its second, once there is enough of it to compare.
+///
+/// This is the one measurement meant to be read while training rather than
+/// afterwards — the useful moment to learn a session has stopped helping is
+/// during it.
+pub fn sitting_fatigue(store: &Store, session_id: i64) -> Result<Option<(f64, f64, usize)>> {
+    let results = store.sitting_results(session_id)?;
+    if results.len() < MIN_SITTING_SOLVES {
+        return Ok(None);
+    }
+    let half = results.len() / 2;
+    let rate = |slice: &[bool]| slice.iter().filter(|ok| **ok).count() as f64 / slice.len() as f64;
+    let early = rate(&results[..half]);
+    let late = rate(&results[half..]);
+    Ok(Some((early, late, results.len())))
+}
+
 /// Openings worth drilling: the ones the player reaches often and scores badly
 /// in, paired with the moves that reach them.
 ///
@@ -1314,6 +1347,8 @@ mod weakness_tests {
                         Rating::Again
                     },
                     puzzle_rating: 1150,
+                    session_id: None,
+                    index_in_session: 0,
                 })
                 .unwrap();
         }

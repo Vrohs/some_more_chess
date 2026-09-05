@@ -786,6 +786,8 @@ fn own_mistakes_are_narrowed_to_the_phase_that_costs_games() {
                     correct,
                     grade: rs_fsrs::Rating::Good,
                     puzzle_rating: RATING_FLOOR,
+                    session_id: None,
+                    index_in_session: 0,
                 })
                 .unwrap();
         }
@@ -804,5 +806,196 @@ fn own_mistakes_are_narrowed_to_the_phase_that_costs_games() {
     assert!(
         served.themes.iter().any(|t| t == OWN_GAME_THEME),
         "and it is still one of the player's own positions"
+    );
+}
+
+/// A panic is the fault worth catching: in a GTK callback it unwinds into C
+/// and aborts, so the hook is the only chance to write down why the window
+/// vanished. It must also leave the previous hook working.
+#[test]
+fn a_panic_is_written_down_before_the_process_dies() {
+    use omachess_core::diagnostics::{self, Fault};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("diagnostics.jsonl");
+
+    // The hook writes to a fixed location, so the behaviour is exercised
+    // through the same append path it uses rather than by installing it here
+    // and panicking the test runner.
+    diagnostics::append(
+        &path,
+        &diagnostics::Record {
+            at: Utc::now(),
+            fault: Fault::Panic,
+            site: "trainer.rs:512".into(),
+            message: "called `Option::unwrap()` on a `None` value".into(),
+            version: "0.1.0".into(),
+        },
+    );
+
+    let records = diagnostics::read(&path);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].fault, Fault::Panic);
+    assert_eq!(records[0].site, "trainer.rs:512");
+    assert!(records[0].message.contains("unwrap"));
+}
+
+/// Every move offered is kept, not just the verdict — a solver reaching for
+/// the same losing idea across many positions has one habit, and the attempt
+/// record alone can never show it.
+#[test]
+fn wrong_moves_are_kept_and_counted() {
+    let store = Store::in_memory().unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 5, 1, 9, 0, 0).unwrap();
+    let sitting = store.begin_session("puzzles", at).unwrap();
+
+    // The same wrong capture reached for in three different positions.
+    for (index, puzzle) in ["p1", "p2", "p3"].iter().enumerate() {
+        store
+            .record_attempt_move(
+                Some(sitting),
+                puzzle,
+                at + Duration::minutes(index as i64),
+                0,
+                "f3g5",
+                "c1e3",
+                false,
+                std::time::Duration::from_millis(4200),
+                false,
+            )
+            .unwrap();
+    }
+    // And one correct move, which must not appear in the wrong list.
+    store
+        .record_attempt_move(
+            Some(sitting),
+            "p4",
+            at + Duration::minutes(9),
+            0,
+            "c1e3",
+            "c1e3",
+            true,
+            std::time::Duration::from_millis(1500),
+            false,
+        )
+        .unwrap();
+
+    let wrong = store.wrong_moves().unwrap();
+    assert_eq!(wrong.len(), 1, "one habit, not three unrelated failures");
+    assert_eq!(wrong[0], ("f3g5".to_owned(), "c1e3".to_owned(), 3));
+
+    store
+        .end_session(sitting, at + Duration::minutes(10))
+        .unwrap();
+}
+
+/// Attempts are filed by how deep into a sitting they were, which is what
+/// makes fatigue a question the data can answer.
+#[test]
+fn attempts_remember_how_deep_into_a_sitting_they_were() {
+    use omachess_core::session::{Session, Solve};
+
+    let mut store = Store::in_memory().unwrap();
+    ingest_csv(&mut store, CSV.as_bytes(), RATING_FLOOR).unwrap();
+    let session = Session::new();
+    let start = Utc.with_ymd_and_hms(2026, 5, 1, 9, 0, 0).unwrap();
+
+    session.open_sitting(&store, "puzzles", start).unwrap();
+    assert!(session.sitting().is_some());
+
+    for (index, id) in IDS.iter().take(3).enumerate() {
+        session
+            .submit(
+                &mut store,
+                &Solve {
+                    puzzle_id: (*id).to_owned(),
+                    puzzle_rating: 1150,
+                    correct: index != 2,
+                    elapsed: Duration::seconds(10),
+                },
+                start + Duration::minutes(index as i64),
+            )
+            .unwrap();
+    }
+
+    let filed = store.by_position_in_session().unwrap();
+    assert_eq!(filed.len(), 3);
+    assert_eq!(filed[0].0, 0, "the first solve is index zero");
+    assert_eq!(filed[2].0, 2, "and the third is index two");
+    assert!(!filed[2].1, "the third was wrong");
+
+    session
+        .close_sitting(&store, start + Duration::hours(1))
+        .unwrap();
+    assert!(session.sitting().is_none());
+}
+
+/// A sitting that has gone downhill should be called while it is running, but
+/// only once there is enough of it to compare and the drop is real rather than
+/// ordinary variation.
+#[test]
+fn a_sitting_is_only_called_tired_once_the_drop_is_real() {
+    use omachess_core::progress::{sitting_fatigue, FATIGUE_DROP, MIN_SITTING_SOLVES};
+    use omachess_core::store::AttemptRecord;
+
+    let store = Store::in_memory().unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 5, 1, 9, 0, 0).unwrap();
+    let sitting = store.begin_session("puzzles", at).unwrap();
+
+    let file = |index: u32, correct: bool| {
+        store
+            .record_attempt(&AttemptRecord {
+                puzzle_id: format!("p{index}"),
+                reviewed_at: at + Duration::minutes(index as i64),
+                elapsed: Duration::seconds(10),
+                correct,
+                grade: rs_fsrs::Rating::Good,
+                puzzle_rating: RATING_FLOOR,
+                session_id: Some(sitting),
+                index_in_session: index,
+            })
+            .unwrap();
+    };
+
+    // Too few to judge.
+    for index in 0..(MIN_SITTING_SOLVES as u32 - 1) {
+        file(index, index < 2);
+    }
+    assert!(
+        sitting_fatigue(&store, sitting).unwrap().is_none(),
+        "a sitting is not judged before there is enough of it"
+    );
+
+    // Eight in: four right early, one right late — a real collapse.
+    file(MIN_SITTING_SOLVES as u32 - 1, false);
+    let (early, late, count) = sitting_fatigue(&store, sitting)
+        .unwrap()
+        .expect("enough now");
+    assert_eq!(count, MIN_SITTING_SOLVES);
+    assert!(
+        early - late >= FATIGUE_DROP,
+        "expected a real drop, got {early} then {late}"
+    );
+
+    // A steady sitting must not be called tired.
+    let steady = store.begin_session("puzzles", at).unwrap();
+    for index in 0..MIN_SITTING_SOLVES as u32 {
+        store
+            .record_attempt(&AttemptRecord {
+                puzzle_id: format!("s{index}"),
+                reviewed_at: at + Duration::minutes(index as i64),
+                elapsed: Duration::seconds(10),
+                correct: true,
+                grade: rs_fsrs::Rating::Good,
+                puzzle_rating: RATING_FLOOR,
+                session_id: Some(steady),
+                index_in_session: index,
+            })
+            .unwrap();
+    }
+    let (early, late, _) = sitting_fatigue(&store, steady).unwrap().unwrap();
+    assert!(
+        early - late < FATIGUE_DROP,
+        "a steady sitting is left alone"
     );
 }

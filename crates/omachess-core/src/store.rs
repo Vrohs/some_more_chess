@@ -93,6 +93,64 @@ CREATE TABLE IF NOT EXISTS settings (
 -- One attempt at converting a theoretical endgame. Whether a won position was
 -- won is the least arguable measurement in the application, so it is kept
 -- separate from puzzle attempts rather than blended into them.
+-- Where a drill position came from.
+--
+-- A position lifted from a lost game is only training material if the solver
+-- can be told what they actually played and what it cost. Without that it is
+-- an anonymous puzzle that happens to have come from somewhere.
+CREATE TABLE IF NOT EXISTS drill_positions (
+    puzzle_id  TEXT PRIMARY KEY,
+    source     TEXT NOT NULL,
+    played_at  TEXT NOT NULL,
+    ply        INTEGER NOT NULL,
+    played     TEXT NOT NULL,
+    best       TEXT NOT NULL,
+    lost       REAL NOT NULL,
+    phase      TEXT NOT NULL,
+    opponent   TEXT NOT NULL DEFAULT ''
+);
+
+-- Every move offered during a solve, right or wrong.
+--
+-- The verdict alone throws away the part worth having: which wrong move
+-- attracted the solver. A player who reaches for the same losing capture in
+-- twenty positions has one habit, not twenty failures, and that is only
+-- visible if the move played is written down.
+CREATE TABLE IF NOT EXISTS attempt_moves (
+    id          INTEGER PRIMARY KEY,
+    session_id  INTEGER,
+    puzzle_id   TEXT NOT NULL,
+    started_at  TEXT NOT NULL,
+    ply         INTEGER NOT NULL,
+    played      TEXT NOT NULL,
+    expected    TEXT NOT NULL,
+    correct     INTEGER NOT NULL,
+    thought_ms  INTEGER NOT NULL,
+    revealed    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS attempt_moves_puzzle ON attempt_moves (puzzle_id, started_at);
+CREATE INDEX IF NOT EXISTS attempt_moves_session ON attempt_moves (session_id, id);
+
+-- A sitting at the board, so fatigue is measurable: whether the twentieth
+-- puzzle of a session goes worse than the second is a training question, and
+-- unanswerable without knowing which sitting each attempt belonged to.
+CREATE TABLE IF NOT EXISTS sessions (
+    id         INTEGER PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    ended_at   TEXT,
+    kind       TEXT NOT NULL
+);
+
+-- Anything else worth recording, kept loosely so a new measurement does not
+-- need a migration before it can start collecting.
+CREATE TABLE IF NOT EXISTS events (
+    id     INTEGER PRIMARY KEY,
+    at     TEXT NOT NULL,
+    kind   TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_kind ON events (kind, at);
+
 CREATE TABLE IF NOT EXISTS endgame_attempts (
     id           INTEGER PRIMARY KEY,
     endgame_key  TEXT NOT NULL,
@@ -215,6 +273,26 @@ pub struct AttemptRecord {
     pub correct: bool,
     pub grade: Rating,
     pub puzzle_rating: u32,
+    /// The sitting this belonged to, and how many solves preceded it in that
+    /// sitting. A solve is not the same event fresh as it is twenty deep.
+    pub session_id: Option<i64>,
+    pub index_in_session: u32,
+}
+
+/// Where a drill position was taken from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrillOrigin {
+    /// The game it came from, empty for one played in the application.
+    pub source: String,
+    pub played_at: DateTime<Utc>,
+    /// The move number in that game.
+    pub ply: u32,
+    /// What was actually played, and what should have been.
+    pub played: String,
+    pub best: String,
+    /// Win probability given away, 0 to 1.
+    pub lost: f64,
+    pub phase: String,
 }
 
 pub struct Store {
@@ -257,7 +335,7 @@ impl Store {
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as u32;
 
         // Steps are appended here and never renumbered or edited once shipped.
-        let steps: [&str; 5] = [
+        let steps: [&str; 6] = [
             // Imported games need an identity of their own so a re-import does
             // not duplicate them; games played in the app leave it empty.
             "ALTER TABLE games ADD COLUMN source TEXT NOT NULL DEFAULT ''",
@@ -287,6 +365,11 @@ impl Store {
             "ALTER TABLE games ADD COLUMN time_control TEXT NOT NULL DEFAULT '';
              ALTER TABLE games ADD COLUMN pressure_moves INTEGER NOT NULL DEFAULT 0;
              ALTER TABLE games ADD COLUMN pressure_blunders INTEGER NOT NULL DEFAULT 0",
+            // Which sitting an attempt belonged to, and how far into it. A
+            // solve is not the same event at the start of a session as at the
+            // end of one, and until now there was no way to tell them apart.
+            "ALTER TABLE attempts ADD COLUMN session_id INTEGER;
+             ALTER TABLE attempts ADD COLUMN index_in_session INTEGER NOT NULL DEFAULT 0",
         ];
 
         for (index, sql) in steps.iter().enumerate() {
@@ -559,8 +642,9 @@ impl Store {
     pub fn record_attempt(&self, attempt: &AttemptRecord) -> Result<()> {
         self.conn.execute(
             "INSERT INTO attempts
-             (puzzle_id, reviewed_at, elapsed_ms, correct, grade, puzzle_rating, band)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (puzzle_id, reviewed_at, elapsed_ms, correct, grade, puzzle_rating, band,
+                session_id, index_in_session)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 attempt.puzzle_id,
                 attempt.reviewed_at,
@@ -569,6 +653,8 @@ impl Store {
                 attempt.grade as i64,
                 attempt.puzzle_rating,
                 band(attempt.puzzle_rating),
+                attempt.session_id,
+                attempt.index_in_session,
             ],
         )?;
         Ok(())
@@ -817,6 +903,165 @@ impl Store {
             params![source, player],
             |r| r.get::<_, i64>(0),
         )? > 0)
+    }
+
+    // -- drills ----------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_drill_origin(
+        &self,
+        puzzle_id: &str,
+        source: &str,
+        played_at: DateTime<Utc>,
+        ply: u32,
+        played: &str,
+        best: &str,
+        lost: f64,
+        phase: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO drill_positions
+             (puzzle_id, source, played_at, ply, played, best, lost, phase)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![puzzle_id, source, played_at, ply, played, best, lost, phase],
+        )?;
+        Ok(())
+    }
+
+    /// Where a drill position came from, for telling the solver what they did.
+    pub fn drill_origin(&self, puzzle_id: &str) -> Result<Option<DrillOrigin>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT source, played_at, ply, played, best, lost, phase
+                 FROM drill_positions WHERE puzzle_id = ?1",
+                params![puzzle_id],
+                |r| {
+                    Ok(DrillOrigin {
+                        source: r.get(0)?,
+                        played_at: r.get(1)?,
+                        ply: r.get(2)?,
+                        played: r.get(3)?,
+                        best: r.get(4)?,
+                        lost: r.get(5)?,
+                        phase: r.get(6)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    // -- raw collection --------------------------------------------------
+
+    /// Open a sitting and return its id.
+    pub fn begin_session(&self, kind: &str, at: DateTime<Utc>) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO sessions (started_at, kind) VALUES (?1, ?2)",
+            params![at, kind],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn end_session(&self, id: i64, at: DateTime<Utc>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET ended_at = ?2 WHERE id = ?1",
+            params![id, at],
+        )?;
+        Ok(())
+    }
+
+    /// Record one move offered during a solve.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_attempt_move(
+        &self,
+        session_id: Option<i64>,
+        puzzle_id: &str,
+        started_at: DateTime<Utc>,
+        ply: u32,
+        played: &str,
+        expected: &str,
+        correct: bool,
+        thought: std::time::Duration,
+        revealed: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO attempt_moves
+             (session_id, puzzle_id, started_at, ply, played, expected, correct,
+              thought_ms, revealed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                session_id,
+                puzzle_id,
+                started_at,
+                ply,
+                played,
+                expected,
+                correct as i64,
+                thought.as_millis() as i64,
+                revealed as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every wrong move played, most frequent first, with what was right.
+    ///
+    /// This is the raw material for noticing a habit rather than a run of
+    /// unrelated failures.
+    pub fn wrong_moves(&self) -> Result<Vec<(String, String, u32)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT played, expected, COUNT(*) AS n
+             FROM attempt_moves WHERE correct = 0
+             GROUP BY played, expected ORDER BY n DESC, played ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u32))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Correctness and time by position within a sitting, for reading fatigue.
+    pub fn by_position_in_session(&self) -> Result<Vec<(u32, bool, i64)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT index_in_session, correct, elapsed_ms
+             FROM attempts WHERE session_id IS NOT NULL
+             ORDER BY index_in_session ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)? as u32,
+                r.get::<_, i64>(1)? != 0,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Correctness in order for one sitting, for judging it while it runs.
+    pub fn sitting_results(&self, session_id: i64) -> Result<Vec<bool>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT correct FROM attempts WHERE session_id = ?1
+             ORDER BY index_in_session ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |r| Ok(r.get::<_, i64>(0)? != 0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Record anything worth keeping that has no table of its own.
+    pub fn record_event(&self, at: DateTime<Utc>, kind: &str, detail: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO events (at, kind, detail) VALUES (?1, ?2, ?3)",
+            params![at, kind, detail],
+        )?;
+        Ok(())
+    }
+
+    pub fn events(&self, kind: &str, limit: u32) -> Result<Vec<(DateTime<Utc>, String)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT at, detail FROM events WHERE kind = ?1 ORDER BY at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![kind, limit], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     // -- endgames --------------------------------------------------------

@@ -30,6 +30,12 @@ struct Current {
     puzzle: Puzzle,
     attempt: Attempt,
     started: Instant,
+    /// When this move began, so each move is timed rather than only the solve.
+    move_started: Instant,
+    /// Which move of the solution is being answered.
+    ply: u32,
+    /// When the attempt began, in wall time, so its moves can be joined to it.
+    began_at: chrono::DateTime<Utc>,
     /// Set once a wrong move has been played; the attempt still finishes, but
     /// it is recorded as a failure.
     failed: bool,
@@ -47,6 +53,8 @@ pub struct Trainer {
     sounds: Rc<Sounds>,
     mode_switch: Switch,
     own_switch: Switch,
+    /// What the solver actually played here, once it can be shown.
+    origin: Label,
     mode_caption: Label,
     start: Button,
     /// Whether the solver has begun this session. Only the first puzzle waits
@@ -94,7 +102,16 @@ impl Trainer {
         // The positions you actually lost from are the material a coach would
         // pick, and there are only ever a few dozen, so they need asking for.
         let own_switch = Switch::builder().valign(Align::Center).build();
-        let own_label = Label::builder().label("My mistakes").build();
+        let own_label = Label::builder().label("Drill my mistakes").build();
+
+        // Filled in when a drill position is finished: which game it came from
+        // and what was played instead. Blank for an ordinary puzzle.
+        let origin = Label::builder()
+            .halign(Align::Start)
+            .wrap(true)
+            .max_width_chars(46)
+            .build();
+        origin.add_css_class("dim-label");
         let mode_caption = Label::builder()
             .halign(Align::Start)
             .wrap(true)
@@ -128,6 +145,7 @@ impl Trainer {
         header.append(&mode_row);
         header.append(&status);
         header.append(&mode_caption);
+        header.append(&origin);
 
         let root = GtkBox::builder()
             .orientation(Orientation::Vertical)
@@ -157,6 +175,7 @@ impl Trainer {
             sounds,
             mode_switch,
             own_switch,
+            origin,
             mode_caption,
             start,
             session_started: Cell::new(false),
@@ -328,6 +347,10 @@ impl Trainer {
     }
 
     fn load_next(&self) {
+        // A new position is walked into blind, so whatever the last one
+        // revealed is cleared before it appears.
+        self.origin.set_label("");
+        self.origin.remove_css_class("warning");
         let next = {
             let store = self.store.borrow();
             self.session.next_puzzle(&store, Utc::now())
@@ -359,6 +382,9 @@ impl Trainer {
                         puzzle,
                         attempt,
                         started: Instant::now(),
+                        move_started: Instant::now(),
+                        ply: 0,
+                        began_at: Utc::now(),
                         failed: false,
                         started_solving: false,
                         misses: 0,
@@ -383,12 +409,26 @@ impl Trainer {
                     .set_label("Nothing to solve. Load the puzzle database, or come back when reviews are due.");
                 *self.current.borrow_mut() = None;
             }
-            Err(e) => self.status.set_label(&format!("Database error: {e}")),
+            Err(e) => {
+                omachess_core::diagnostics::record_error("trainer::load_next", &e);
+                self.status.set_label(&format!("Database error: {e}"));
+            }
         }
     }
 
     /// Begin the session. Only the first puzzle needs this.
     fn begin_solving(&self) {
+        // A sitting is opened once, on the first puzzle, so every attempt can
+        // be filed by how deep into the session it was. Whether the twentieth
+        // solve goes worse than the second is a training question, and it
+        // cannot be asked at all without this.
+        if let Err(e) = self
+            .session
+            .open_sitting(&self.store.borrow(), "puzzles", Utc::now())
+        {
+            omachess_core::diagnostics::record_error("trainer::open_sitting", e);
+        }
+
         self.session_started.set(true);
         let side = match self
             .current
@@ -472,6 +512,73 @@ impl Trainer {
         Some(San::from_move(position, mv).to_string())
     }
 
+    /// Say so when this sitting has stopped helping.
+    ///
+    /// The useful moment to learn that a session has gone downhill is during
+    /// it, not in a report a week later. Solving badly and tired teaches the
+    /// habit of solving badly.
+    fn check_fatigue(&self) {
+        let Some(sitting) = self.session.sitting() else {
+            return;
+        };
+        let reading = omachess_core::progress::sitting_fatigue(&self.store.borrow(), sitting);
+        let Ok(Some((early, late, count))) = reading else {
+            return;
+        };
+        if early - late < omachess_core::progress::FATIGUE_DROP {
+            return;
+        }
+        // The drill's own explanation was just written here and is worth
+        // keeping; this is added to it rather than over it.
+        let warning = format!(
+            "{count} in, and this sitting has turned: {:.0}% right early against {:.0}% now. \
+             Solving tired trains solving badly — a good place to stop.",
+            early * 100.0,
+            late * 100.0,
+        );
+        let existing = self.origin.label();
+        self.origin.set_label(&if existing.is_empty() {
+            warning
+        } else {
+            format!("{existing}\n\n{warning}")
+        });
+        self.origin.add_css_class("warning");
+    }
+
+    /// Say what was played in the game this position came from.
+    ///
+    /// Shown only once the position is answered: beforehand it would give the
+    /// move away, and the point of a drill is to walk in blind.
+    fn show_origin(&self) {
+        let id = {
+            let current = self.current.borrow();
+            match current.as_ref() {
+                Some(current) => current.puzzle.id.clone(),
+                None => return,
+            }
+        };
+        let origin = self.store.borrow().drill_origin(&id).ok().flatten();
+        let Some(origin) = origin else {
+            self.origin.set_label("");
+            return;
+        };
+        let moves = origin.ply / 2 + 1;
+        self.origin.set_label(&format!(
+            "From your game on {}, move {moves}: you played {} and it cost {:.0}% \
+             of the win. The move was {}.",
+            origin.played_at.format("%-d %b"),
+            origin.played,
+            origin.lost * 100.0,
+            origin.best,
+        ));
+    }
+
+    /// The move the puzzle is asking for, in the notation the raw log keeps.
+    fn expected_uci(&self) -> Option<String> {
+        let current = self.current.borrow();
+        current.as_ref()?.attempt.expected().map(str::to_owned)
+    }
+
     /// A piece dragged straight from one square to another.
     fn on_drag(self: &Rc<Self>, from: Square, to: Square) {
         if !self.solving() || !self.has_own_piece(from) {
@@ -524,6 +631,21 @@ impl Trainer {
     }
 
     fn offer(self: &Rc<Self>, mv: &Move) {
+        // Captured before the move is judged: afterwards the attempt has moved
+        // on and the answer that was expected here is no longer reachable.
+        let context = {
+            let current = self.current.borrow();
+            current.as_ref().map(|current| {
+                (
+                    current.puzzle.id.clone(),
+                    current.began_at,
+                    current.ply,
+                    current.move_started.elapsed(),
+                    current.misses >= REVEAL_AFTER_MISSES,
+                    self.expected_uci().unwrap_or_default(),
+                )
+            })
+        };
         let outcome = {
             let mut current = self.current.borrow_mut();
             let Some(current) = current.as_mut() else {
@@ -531,6 +653,37 @@ impl Trainer {
             };
             current.attempt.play(mv)
         };
+
+        // Every move offered is written down, right or wrong. The wrong ones
+        // are the point: a solver who reaches for the same losing idea across
+        // twenty positions has one habit, and the verdict alone never shows it.
+        if let Some((puzzle_id, began_at, ply, thought, revealed, expected)) = context {
+            let correct = matches!(
+                outcome,
+                Ok(MoveOutcome::Continued(_)) | Ok(MoveOutcome::Solved)
+            );
+            let played = mv.to_uci(shakmaty::CastlingMode::Standard).to_string();
+            let recorded = self.store.borrow().record_attempt_move(
+                self.session.sitting(),
+                &puzzle_id,
+                began_at,
+                ply,
+                &played,
+                &expected,
+                correct,
+                thought,
+                revealed,
+            );
+            if let Err(e) = recorded {
+                omachess_core::diagnostics::record_error("trainer::record_attempt_move", e);
+            }
+            if let Some(current) = self.current.borrow_mut().as_mut() {
+                current.move_started = Instant::now();
+                if correct {
+                    current.ply += 1;
+                }
+            }
+        }
 
         match outcome {
             Ok(MoveOutcome::Wrong) => {
@@ -600,6 +753,9 @@ impl Trainer {
     }
 
     fn finish(self: &Rc<Self>) {
+        self.show_origin();
+        self.check_fatigue();
+
         let Some(current) = self.current.borrow_mut().take() else {
             return;
         };

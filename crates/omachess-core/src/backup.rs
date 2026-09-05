@@ -164,6 +164,8 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
             correct: row.correct,
             grade: grade_from(row.grade),
             puzzle_rating: row.puzzle_rating,
+            session_id: None,
+            index_in_session: 0,
         })?;
         report.attempts_added += 1;
     }
@@ -243,6 +245,8 @@ mod tests {
                     correct: i % 2 == 0,
                     grade: rs_fsrs::Rating::Good,
                     puzzle_rating: 1150,
+                    session_id: None,
+                    index_in_session: 0,
                 })
                 .unwrap();
         }
@@ -326,6 +330,8 @@ mod tests {
                 correct: true,
                 grade: rs_fsrs::Rating::Good,
                 puzzle_rating: 1200,
+                session_id: None,
+                index_in_session: 0,
             })
             .unwrap();
 

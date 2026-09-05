@@ -29,12 +29,30 @@ use trainer::Trainer;
 const APP_ID: &str = "dev.omachess.Omachess";
 
 fn main() -> ExitCode {
+    // Before anything else: a panic in a GTK callback unwinds into C and
+    // aborts, so this is the only chance to write down why the window vanished.
+    omachess_core::diagnostics::install_panic_hook();
+
+    // The toolkit's own complaints go to the same place. A CRITICAL is often
+    // harmless, but it is also what a widget used after being dropped looks
+    // like, and that has cost this application a whole afternoon before.
+    gtk4::glib::log_set_default_handler(|domain, level, message| {
+        if matches!(
+            level,
+            gtk4::glib::LogLevel::Critical | gtk4::glib::LogLevel::Error
+        ) {
+            omachess_core::diagnostics::record_toolkit(domain.unwrap_or("gtk"), message);
+        }
+        gtk4::glib::log_default_handler(domain, level, Some(message));
+    });
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("ingest") => command_ingest(args.get(1).map(PathBuf::from)),
         Some("status") => command_status(),
         Some("progress") => command_progress(),
         Some("games") => command_games(),
+        Some("doctor") => command_doctor(),
         Some("export") => command_export(args.get(1).map(PathBuf::from)),
         Some("restore") => command_restore(args.get(1).map(PathBuf::from)),
         Some("import-pgn") => command_import_pgn(args.get(1).map(PathBuf::from), args.get(2)),
@@ -49,6 +67,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
+            omachess_core::diagnostics::record_error("command", &e);
             eprintln!("omachess: {e:#}");
             ExitCode::FAILURE
         }
@@ -65,6 +84,7 @@ USAGE:
     omachess status          Report what is stored
     omachess progress        Show the time-to-solve trend per rating band
     omachess games           Show how well you have been playing the engine
+    omachess doctor          Faults recorded, and the raw data behind training
     omachess export <FILE>   Write your history to a file you can keep
     omachess restore <FILE>  Merge a history file back in
     omachess study <FILE>    Open a PGN in the Study tab and step through it
@@ -307,6 +327,77 @@ fn command_games() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Everything the application has collected about itself and about the
+/// solver, in one place: faults first, then the raw skill data.
+fn command_doctor() -> anyhow::Result<()> {
+    use omachess_core::diagnostics::{self, Fault};
+
+    let path = diagnostics::default_path();
+    let faults = diagnostics::read(&path);
+    println!("faults  ({})", path.display());
+    if faults.is_empty() {
+        println!("  nothing recorded");
+    } else {
+        for (fault, count, latest) in diagnostics::summarise(&faults) {
+            println!(
+                "  {:8} {count:4}   most recent {}",
+                fault.label(),
+                latest.format("%Y-%m-%d %H:%M")
+            );
+        }
+        println!();
+        println!("  the five most recent:");
+        for record in faults.iter().rev().take(5) {
+            println!(
+                "    {} [{}] {} — {}",
+                record.at.format("%m-%d %H:%M"),
+                record.fault.label(),
+                record.site,
+                record.message.lines().next().unwrap_or("")
+            );
+        }
+        if faults.iter().any(|r| r.fault == Fault::Panic) {
+            println!();
+            println!("  a panic means the window closed on you. Worth reporting.");
+        }
+    }
+
+    let store = open_store()?;
+    println!();
+    println!("raw skill data");
+    let moves = store.wrong_moves()?;
+    let total: u32 = moves.iter().map(|(_, _, n)| n).sum();
+    println!("  wrong moves recorded: {total}");
+    if !moves.is_empty() {
+        println!("  the ones you keep reaching for:");
+        for (played, expected, count) in moves.iter().take(8) {
+            println!("    {played:6} instead of {expected:6}  x{count}");
+        }
+    }
+
+    let by_position = store.by_position_in_session()?;
+    if by_position.is_empty() {
+        println!("  no sittings recorded yet");
+    } else {
+        // Early against late within a sitting: whether the twentieth puzzle
+        // goes worse than the second is the fatigue question.
+        let half = by_position.len() / 2;
+        let rate = |slice: &[(u32, bool, i64)]| -> f64 {
+            if slice.is_empty() {
+                return 0.0;
+            }
+            slice.iter().filter(|(_, ok, _)| *ok).count() as f64 / slice.len() as f64
+        };
+        println!(
+            "  within a sitting: {:.0}% correct early, {:.0}% late ({} attempts)",
+            rate(&by_position[..half]) * 100.0,
+            rate(&by_position[half..]) * 100.0,
+            by_position.len()
+        );
+    }
+    Ok(())
+}
+
 fn command_export(path: Option<PathBuf>) -> anyhow::Result<()> {
     let Some(path) = path else {
         anyhow::bail!("usage: omachess export <file.json>");
@@ -438,13 +529,34 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
             .opponent_elo(*side)
             .unwrap_or(personal_rating)
             .max(RATING_FLOOR);
-        let own: Vec<_> = analysis
-            .drillable()
+        let drillable = analysis.drillable();
+        let own: Vec<_> = drillable
             .iter()
             .map(|review| puzzle_from(review, band, &stable_puzzle_id(review)))
             .collect();
+        // Kept alongside the puzzle: a position from a lost game is only
+        // training material if the solver can be told what they played here and
+        // what it cost. Without that it is an anonymous puzzle.
+        let played_at = parse_date(game.date.as_deref()).unwrap_or_else(chrono::Utc::now);
+        let origins: Vec<_> = drillable
+            .iter()
+            .map(|review| {
+                (
+                    stable_puzzle_id(review),
+                    review.ply as u32,
+                    review.played.clone(),
+                    review.best.clone(),
+                    review.lost(),
+                    review.phase.theme(),
+                )
+            })
+            .collect();
+        drop(drillable);
         learned += own.len();
         store.insert_puzzles(&own)?;
+        for (id, ply, played, best, lost, phase) in origins {
+            store.record_drill_origin(&id, &source, played_at, ply, &played, &best, lost, phase)?;
+        }
 
         let opening = omachess_core::openings::identify(&game.moves);
         let counts = analysis.counts();

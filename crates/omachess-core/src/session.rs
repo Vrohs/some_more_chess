@@ -39,6 +39,11 @@ pub struct Outcome {
 #[derive(Default)]
 pub struct Session {
     fsrs: FSRS,
+    /// The sitting in progress, and how many solves it has seen. Held here so
+    /// every attempt is filed against it without the caller having to
+    /// remember, which is how a counter like this quietly stops being kept.
+    sitting: std::cell::Cell<Option<i64>>,
+    solved_here: std::cell::Cell<u32>,
 }
 
 impl Session {
@@ -57,6 +62,33 @@ impl Session {
 
     /// Record a solve: grade it against the baseline, advance the FSRS card,
     /// store the attempt, and update the personal rating.
+    /// Open a sitting, so attempts can be told apart by how deep into a
+    /// session they were. Called once when the trainer starts working.
+    pub fn open_sitting(&self, store: &Store, kind: &str, now: DateTime<Utc>) -> Result<()> {
+        if self.sitting.get().is_some() {
+            return Ok(());
+        }
+        self.sitting.set(Some(store.begin_session(kind, now)?));
+        self.solved_here.set(0);
+        Ok(())
+    }
+
+    pub fn close_sitting(&self, store: &Store, now: DateTime<Utc>) -> Result<()> {
+        if let Some(id) = self.sitting.take() {
+            store.end_session(id, now)?;
+        }
+        Ok(())
+    }
+
+    pub fn sitting(&self) -> Option<i64> {
+        self.sitting.get()
+    }
+
+    /// How many puzzles have been solved in this sitting so far.
+    pub fn solved_here(&self) -> u32 {
+        self.solved_here.get()
+    }
+
     pub fn submit(&self, store: &mut Store, solve: &Solve, now: DateTime<Utc>) -> Result<Outcome> {
         let baseline = self.baseline(store, solve.puzzle_rating)?;
         let rating = grade(solve.correct, solve.elapsed, baseline);
@@ -78,10 +110,13 @@ impl Session {
             puzzle_id: solve.puzzle_id.clone(),
             reviewed_at: now,
             elapsed: solve.elapsed,
+            session_id: self.sitting.get(),
+            index_in_session: self.solved_here.get(),
             correct: solve.correct,
             grade: rating,
             puzzle_rating: solve.puzzle_rating,
         })?;
+        self.solved_here.set(self.solved_here.get() + 1);
 
         let personal_rating = next_rating(
             store.personal_rating()?,
