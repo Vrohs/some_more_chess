@@ -153,21 +153,12 @@ impl ProgressView {
                 )));
                 if let Some(multiplier) = record.multiplier() {
                     let verdict = Label::builder()
-                        .label(if multiplier >= 1.5 {
-                            format!(
-                                "{multiplier:.1}x more often when the clock is low. This is where \
-                                 your games are decided — practise moving before it gets here."
-                            )
-                        } else if multiplier <= 0.75 {
-                            format!("{multiplier:.1}x — a low clock is not what costs you.")
-                        } else {
-                            "About the same either way; the clock is not the cause.".to_owned()
-                        })
+                        .label(pressure_verdict(multiplier))
                         .halign(Align::Start)
                         .wrap(true)
                         .build();
-                    if multiplier >= 1.5 {
-                        verdict.add_css_class("error");
+                    if let Some(class) = pressure_class(multiplier) {
+                        verdict.add_css_class(class);
                     }
                     self.root.append(&verdict);
                 }
@@ -365,10 +356,8 @@ fn opening_row(record: &OpeningRecord) -> GtkBox {
         .halign(Align::End)
         .build();
     // Half a point a game is par against an equal opponent.
-    if record.score() < 0.4 {
-        tally.add_css_class("error");
-    } else if record.score() > 0.6 {
-        tally.add_css_class("success");
+    if let Some(class) = opening_class(record.score()) {
+        tally.add_css_class(class);
     }
     row.append(&tally);
     row
@@ -398,10 +387,7 @@ fn endgame_row(record: &EndgameRecord) -> GtkBox {
 
     // A win in twice the necessary moves is still a win, but it is not yet
     // technique — and the tablebase makes "necessary" a fact, not an opinion.
-    let efficiency = match (record.best_conversion, record.optimal_moves) {
-        (Some(taken), Some(optimal)) => format!("  best {taken} vs {optimal} needed"),
-        _ => String::new(),
-    };
+    let efficiency = efficiency_text(record.best_conversion, record.optimal_moves);
     let score = Label::builder()
         .label(format!(
             "{} / {}{efficiency}",
@@ -418,6 +404,52 @@ fn endgame_row(record: &EndgameRecord) -> GtkBox {
     }
     row.append(&score);
     row
+}
+
+/// A blunder rate this many times higher on a low clock is worth naming as
+/// the thing deciding games; below it, saying so would be reading noise.
+const PRESSURE_ALARMING: f64 = 1.5;
+/// And below this the clock is demonstrably not the problem.
+const PRESSURE_HARMLESS: f64 = 0.75;
+
+/// Par in an opening is half a point a game. These are the distances from par
+/// worth colouring rather than leaving to be read off the number.
+const OPENING_POOR: f64 = 0.4;
+const OPENING_GOOD: f64 = 0.6;
+
+fn pressure_verdict(multiplier: f64) -> String {
+    if multiplier >= PRESSURE_ALARMING {
+        format!(
+            "{multiplier:.1}x more often when the clock is low. This is where your games \
+             are decided — practise moving before it gets here."
+        )
+    } else if multiplier <= PRESSURE_HARMLESS {
+        format!("{multiplier:.1}x — a low clock is not what costs you.")
+    } else {
+        "About the same either way; the clock is not the cause.".to_owned()
+    }
+}
+
+fn pressure_class(multiplier: f64) -> Option<&'static str> {
+    (multiplier >= PRESSURE_ALARMING).then_some("error")
+}
+
+fn opening_class(score: f64) -> Option<&'static str> {
+    if score < OPENING_POOR {
+        Some("error")
+    } else if score > OPENING_GOOD {
+        Some("success")
+    } else {
+        None
+    }
+}
+
+/// How a conversion compares to the fewest moves the position allows.
+fn efficiency_text(best: Option<u32>, optimal: Option<u32>) -> String {
+    match (best, optimal) {
+        (Some(taken), Some(optimal)) => format!("  best {taken} vs {optimal} needed"),
+        _ => String::new(),
+    }
 }
 
 fn section_title(text: &str) -> Label {
@@ -638,4 +670,67 @@ fn play_section(trend: Option<&PlayTrend>, games: usize) -> GtkBox {
          alike. What keeps them comparable is that the opponent is pinned near your rating.",
     ));
     outer
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pressure verdict is the page's strongest claim — it tells the
+    /// player where their games are decided — so the point at which it starts
+    /// making that claim has to be deliberate rather than incidental.
+    #[test]
+    fn the_clock_is_only_blamed_once_the_difference_is_real() {
+        // Well above: named as the thing deciding games, and coloured.
+        let loud = pressure_verdict(3.0);
+        assert!(loud.contains("3.0x"), "{loud}");
+        assert!(loud.contains("where your games are decided"), "{loud}");
+        assert_eq!(pressure_class(3.0), Some("error"));
+
+        // Just at the threshold still counts.
+        assert_eq!(pressure_class(PRESSURE_ALARMING), Some("error"));
+
+        // In between: explicitly says the clock is not the cause, and is not
+        // coloured as a problem.
+        let middling = pressure_verdict(1.1);
+        assert!(middling.contains("not the cause"), "{middling}");
+        assert_eq!(pressure_class(1.1), None);
+
+        // Below: the clock is demonstrably not the problem.
+        let calm = pressure_verdict(0.5);
+        assert!(calm.contains("not what costs you"), "{calm}");
+        assert_eq!(pressure_class(0.5), None);
+    }
+
+    /// Par is half a point a game, and an opening at par should read as
+    /// neither a success nor a failure.
+    #[test]
+    fn an_opening_at_par_is_left_uncoloured() {
+        assert_eq!(opening_class(0.50), None, "par is not a verdict");
+        assert_eq!(
+            opening_class(OPENING_POOR),
+            None,
+            "the boundary is not poor"
+        );
+        assert_eq!(opening_class(OPENING_GOOD), None, "nor good");
+        assert_eq!(opening_class(0.25), Some("error"));
+        assert_eq!(opening_class(0.90), Some("success"));
+    }
+
+    /// A conversion is only worth comparing when both halves are known; a
+    /// position with no distance to mate is drawn and has nothing to beat.
+    #[test]
+    fn efficiency_is_shown_only_when_there_is_something_to_compare() {
+        assert_eq!(
+            efficiency_text(Some(41), Some(18)),
+            "  best 41 vs 18 needed"
+        );
+        assert_eq!(efficiency_text(None, Some(18)), "", "never converted");
+        assert_eq!(
+            efficiency_text(Some(41), None),
+            "",
+            "a drawn position has no target"
+        );
+        assert_eq!(efficiency_text(None, None), "");
+    }
 }

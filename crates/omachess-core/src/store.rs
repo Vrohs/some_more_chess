@@ -1689,3 +1689,152 @@ fn random_cursor() -> String {
         .map(|_| ALPHABET[(next_random() % ALPHABET.len() as u64) as usize] as char)
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn columns(store: &Store, table: &str) -> Vec<String> {
+        let mut stmt = store
+            .conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// A fresh database is built by the base schema and then walked through
+    /// every migration, so a column added to both would collide and a column
+    /// added to neither would be missing. Nothing else checks that the two
+    /// halves still agree.
+    #[test]
+    fn a_fresh_database_ends_up_with_every_column_the_code_reads() {
+        let store = Store::in_memory().unwrap();
+
+        for (table, expected) in [
+            (
+                "games",
+                vec![
+                    "source",
+                    "opening_loss",
+                    "middlegame_loss",
+                    "endgame_loss",
+                    "opening_moves",
+                    "middlegame_moves",
+                    "endgame_moves",
+                    "player",
+                    "opening",
+                    "book_plies",
+                    "time_control",
+                    "pressure_moves",
+                    "pressure_blunders",
+                ],
+            ),
+            ("attempts", vec!["session_id", "index_in_session"]),
+            ("drill_positions", vec!["win_before", "player"]),
+        ] {
+            let found = columns(&store, table);
+            for column in expected {
+                assert!(
+                    found.iter().any(|c| c == column),
+                    "{table} is missing `{column}` — the schema and the migrations \
+                     have drifted apart"
+                );
+            }
+        }
+    }
+
+    /// Migrations run on every open, so applying them twice must be a no-op.
+    /// An `ALTER TABLE` that ran again would fail with a duplicate column and
+    /// take the application down on the second launch, not the first.
+    #[test]
+    fn opening_a_database_twice_applies_nothing_the_second_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("omachess.sqlite");
+
+        let first = Store::open(&path).unwrap();
+        let version: i64 = first
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let before = columns(&first, "games");
+        drop(first);
+
+        let second = Store::open(&path).unwrap();
+        let after: i64 = second
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, version, "the version must not move on a re-open");
+        assert_eq!(before, columns(&second, "games"), "nor the columns");
+    }
+
+    /// The version has to match the number of steps, or the next open would
+    /// either re-run a step or skip one.
+    #[test]
+    fn the_recorded_version_matches_the_number_of_migrations() {
+        let store = Store::in_memory().unwrap();
+        let version: usize = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap() as usize;
+        // Kept in step by hand deliberately: renumbering shipped migrations is
+        // how a database gets corrupted, so the count is asserted instead.
+        assert_eq!(
+            version, 8,
+            "a migration was added without moving the version"
+        );
+    }
+
+    /// An empty database must answer every question with an empty answer
+    /// rather than an error: the application asks all of them on first launch,
+    /// before anything has been done.
+    #[test]
+    fn a_new_database_answers_everything_without_failing() {
+        let store = Store::in_memory().unwrap();
+        assert_eq!(store.count_puzzles().unwrap(), 0);
+        assert_eq!(store.solved_count().unwrap(), 0);
+        assert_eq!(store.due_count(Utc::now()).unwrap(), 0);
+        assert!(store.games().unwrap().is_empty());
+        assert!(store.games_mine().unwrap().is_empty());
+        assert!(store.paired_solves().unwrap().is_empty());
+        assert!(store.first_attempts().unwrap().is_empty());
+        assert!(store.attempt_log().unwrap().is_empty());
+        assert!(store.wrong_moves().unwrap().is_empty());
+        assert!(store.activities().unwrap().is_empty());
+        assert!(store.drills_to_play(10).unwrap().is_empty());
+        assert!(store.endgame_attempts().unwrap().is_empty());
+        assert_eq!(store.retired_drill_count().unwrap(), 0);
+        assert_eq!(store.drill_playout_record().unwrap(), (0, 0));
+        assert_eq!(store.overall_success().unwrap(), 0.0);
+        assert!(store.setting("player_name").unwrap().is_none());
+        assert!(store.unseen_near_rating(1200, None).unwrap().is_none());
+        assert!(store.solved_for_repeat().unwrap().is_none());
+    }
+
+    /// Settings are the one place the application stores loose state, and a
+    /// write has to replace rather than accumulate.
+    #[test]
+    fn a_setting_is_replaced_not_appended() {
+        let store = Store::in_memory().unwrap();
+        store.set_setting("player_name", "vrohs").unwrap();
+        store.set_setting("player_name", "someone_else").unwrap();
+        assert_eq!(
+            store.setting("player_name").unwrap().as_deref(),
+            Some("someone_else")
+        );
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key = 'player_name'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "one row per key");
+    }
+}
