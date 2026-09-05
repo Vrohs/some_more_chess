@@ -358,7 +358,9 @@ impl EndgameView {
         let Some(game) = slot.as_mut() else {
             return;
         };
-        if game.position().turn() != Color::White {
+        // The player is always White in these, but naming the side rather than
+        // assuming it is what the drill board got wrong.
+        if game.position().turn() != game.player() {
             return;
         }
         let prefer = promotion.map(|role| {

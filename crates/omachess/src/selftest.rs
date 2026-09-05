@@ -135,6 +135,81 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>) -> bool {
         )
     }));
 
+    // --- a real drill, a real engine, a real database ---------------------
+    //
+    // The checks above use a fabricated position and no engine, which is
+    // exactly why they kept passing while the tab was unusable. This one opens
+    // whatever database it is pointed at, takes the first drill on offer,
+    // plays the move that answers it, and waits for the engine to reply.
+    if let Ok(path) = std::env::var("OMACHESS_SELFTEST_DB") {
+        checks.push(check(
+            "a real drill plays out against a real engine",
+            || {
+                let store = Store::open(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
+                let offered = store.drills_to_play(1).map_err(|e| e.to_string())?;
+                let (id, _) = offered
+                    .first()
+                    .ok_or("no drill positions on offer")?
+                    .clone();
+                let puzzle = store
+                    .puzzle(&id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("the puzzle behind the drill is missing")?;
+                // The answer is the second move of the stored line: the opponent
+                // moves, then the player replies.
+                let answer = puzzle
+                    .moves
+                    .get(1)
+                    .cloned()
+                    .ok_or("the drill has no answer stored")?;
+                let from: Square = answer[0..2].parse().map_err(|_| "unreadable answer")?;
+                let to: Square = answer[2..4].parse().map_err(|_| "unreadable answer")?;
+
+                let engine = omachess_core::engine::find_engine();
+                expect(engine.is_some(), "no engine on PATH, so nothing to play")?;
+
+                let store = Rc::new(RefCell::new(store));
+                let drills = DrillView::new(store.clone(), pieces.clone(), sounds.clone(), engine);
+                drills.reload();
+                drills.begin();
+
+                let before = drills.moves_played();
+                drills.board().click(from);
+                let picked = drills.board().selected();
+                expect(
+                    picked == Some(from),
+                    &format!(
+                        "the first click did not pick up the piece on {from}: \
+                     selection is {picked:?}. State: {}",
+                        drills.describe_state()
+                    ),
+                )?;
+                drills.board().click(to);
+                let after = drills.moves_played();
+                expect(
+                    after > before,
+                    &format!(
+                        "clicking {from}-{to} played nothing ({before} -> {after}). State: {}",
+                        drills.describe_state()
+                    ),
+                )?;
+
+                // Let the engine answer. It replies through the same timer the
+                // window uses, so the loop has to run for it to arrive.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let context = gtk4::glib::MainContext::default();
+                while std::time::Instant::now() < deadline && drills.moves_played() == after {
+                    while context.iteration(false) {}
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                expect(
+                    drills.moves_played() > after,
+                    "the engine never replied, so the position is stuck after one move",
+                )
+            },
+        ));
+    }
+
     // --- promotion: the question that was never asked ---------------------
     checks.push(check("a promotion offers a choice", || {
         use shakmaty::fen::Fen;

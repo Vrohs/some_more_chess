@@ -218,6 +218,36 @@ impl DrillView {
         view
     }
 
+    /// How many moves the position in progress has seen, so a test can tell
+    /// whether a click actually did anything.
+    pub(crate) fn moves_played(&self) -> usize {
+        self.game
+            .borrow()
+            .as_ref()
+            .map_or(0, |game| game.moves().len())
+    }
+
+    /// Enough of the internal state to say where a click went wrong.
+    pub(crate) fn describe_state(&self) -> String {
+        let positions = self.positions.borrow().len();
+        let game = self.game.borrow();
+        match game.as_ref() {
+            None => format!(
+                "{positions} positions loaded, no game started (settled={})",
+                self.settled.get()
+            ),
+            Some(game) => format!(
+                "{positions} positions loaded, playing as {:?}, {} moves in, \
+                 turn={:?}, settled={}, thinking={}",
+                game.player(),
+                game.moves().len(),
+                game.position().turn(),
+                self.settled.get(),
+                self.thinking.get()
+            ),
+        }
+    }
+
     /// The board itself, so a test can click it the way a person does.
     pub(crate) fn board(&self) -> &Rc<BoardView> {
         &self.board
@@ -453,7 +483,11 @@ impl DrillView {
         let Some(game) = slot.as_mut() else {
             return;
         };
-        if game.position().turn() != Color::White {
+        // Not White — whichever side made the mistake. This was copied from the
+        // endgame board, where the player is always White, and it silently
+        // discarded every move in every drill taken from a game played as
+        // Black, which is most of them.
+        if game.position().turn() != game.player() {
             return;
         }
         let prefer = promotion.map(|role| {
