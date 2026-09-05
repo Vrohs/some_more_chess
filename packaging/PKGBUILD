@@ -4,7 +4,8 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Chess study with spaced repetition and solve-time tracking"
 arch=('x86_64' 'aarch64')
-url="https://github.com/Vrohs/some_more_chess"
+_repo=some_more_chess
+url="https://github.com/Vrohs/$_repo"
 license=('MIT')
 depends=('gtk4' 'libadwaita')
 makedepends=('cargo')
@@ -16,7 +17,7 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
-    cd "$pkgname-$pkgver"
+    cd "$_repo-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     # Belt and braces: the release tarball excludes this, but a build from a
     # working tree would otherwise hit mise's untrusted-config refusal.
@@ -25,21 +26,21 @@ prepare() {
 }
 
 build() {
-    cd "$pkgname-$pkgver"
+    cd "$_repo-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
     cargo build --frozen --release
 }
 
 check() {
-    cd "$pkgname-$pkgver"
+    cd "$_repo-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     # The domain core carries the scheduling and grading logic; it needs no display.
     cargo test --frozen --release -p omachess-core
 }
 
 package() {
-    cd "$pkgname-$pkgver"
+    cd "$_repo-$pkgver"
     install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
     install -Dm644 "packaging/omachess.desktop" \
         "$pkgdir/usr/share/applications/omachess.desktop"
