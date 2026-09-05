@@ -446,6 +446,28 @@ pub fn puzzle_from(review: &MoveAnalysis, rating: u32, id: &str) -> Puzzle {
 /// Derived from the position and the answer rather than from the clock, so
 /// blundering the same way twice updates one puzzle instead of accumulating
 /// near-duplicates in the deck.
+/// A move from this position in the notation people read.
+///
+/// The drill exists to tell a player what they did; "Qh1 instead of Qg3" says
+/// that and "e1h1 instead of e1g3" does not.
+pub fn describe_move(review: &MoveAnalysis, uci: &str) -> String {
+    use shakmaty::san::San;
+    use shakmaty::uci::UciMove;
+
+    let Some(position) = crate::drill::position_after(&review.setup_fen, &review.setup_move) else {
+        return uci.to_owned();
+    };
+    let Ok(parsed) = uci.parse::<UciMove>() else {
+        return uci.to_owned();
+    };
+    match parsed.to_move(&position) {
+        Ok(mv) => San::from_move(&position, mv).to_string(),
+        // An unplayable move is a bug worth seeing rather than hiding, so the
+        // raw text is shown instead of nothing.
+        Err(_) => uci.to_owned(),
+    }
+}
+
 pub fn stable_puzzle_id(review: &MoveAnalysis) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in review
@@ -753,6 +775,30 @@ mod tests {
             "an opponent move was analysed: {:?}",
             analysis.moves
         );
+    }
+
+    /// The drill tells the player what they did, so the notation has to be the
+    /// one they read. Castling is the case that gives the internal form away.
+    #[test]
+    fn moves_are_described_the_way_players_write_them() {
+        // White to move, castling available.
+        let review = MoveAnalysis {
+            ply: 10,
+            setup_fen: "rnbqk2r/pppp1ppp/5n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 1".into(),
+            setup_move: "e8g8".into(),
+            played: "e1g1".into(),
+            best: "d2d4".into(),
+            best_line: vec![],
+            phase: Phase::Opening,
+            win_before: 0.5,
+            win_after: 0.5,
+            severity: None,
+        };
+        assert_eq!(describe_move(&review, "e1g1"), "O-O");
+        assert_eq!(describe_move(&review, "d2d4"), "d4");
+        assert_eq!(describe_move(&review, "f3g5"), "Ng5");
+        // Something unplayable is shown as-is rather than swallowed.
+        assert_eq!(describe_move(&review, "a1a8"), "a1a8");
     }
 }
 

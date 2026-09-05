@@ -440,7 +440,7 @@ const IMPORT_DEPTH: u32 = 12;
 fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::Result<()> {
     use omachess_core::engine::{find_engine, Engine};
     use omachess_core::review::{
-        analyse_game, confirm_drillable, puzzle_from, stable_puzzle_id, AtDepth,
+        analyse_game, confirm_drillable, describe_move, puzzle_from, stable_puzzle_id, AtDepth,
     };
     use omachess_core::store::GameRecord;
 
@@ -544,8 +544,8 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
                 (
                     stable_puzzle_id(review),
                     review.ply as u32,
-                    review.played.clone(),
-                    review.best.clone(),
+                    describe_move(review, &review.played),
+                    describe_move(review, &review.best),
                     review.lost(),
                     review.phase.theme(),
                 )
