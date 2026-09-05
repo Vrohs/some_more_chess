@@ -266,6 +266,22 @@ impl GameAnalysis {
 /// real engine process.
 pub trait Evaluator {
     fn eval(&mut self, fen: &str, moves: &[String]) -> Result<Analysis>;
+
+    /// The best `lines` moves from a position, best first.
+    ///
+    /// Only the confirmation step needs this, and only to find out whether the
+    /// answer is the *only* answer. The default returns the single line an
+    /// ordinary evaluation gives, which makes every position look forced — so
+    /// an evaluator that cannot do better is one that cannot vouch for a
+    /// puzzle, and [`confirm_drillable`] treats it that way.
+    fn eval_lines(&mut self, fen: &str, moves: &[String], _lines: u32) -> Result<Vec<Analysis>> {
+        Ok(vec![self.eval(fen, moves)?])
+    }
+
+    /// Whether this evaluator can compare alternatives at all.
+    fn can_compare_alternatives(&self) -> bool {
+        false
+    }
 }
 
 /// An engine held to a fixed search depth.
@@ -282,11 +298,28 @@ impl Evaluator for AtDepth<'_> {
     fn eval(&mut self, fen: &str, moves: &[String]) -> Result<Analysis> {
         self.engine.analyse(fen, moves, Limit::Depth(self.depth))
     }
+
+    fn eval_lines(&mut self, fen: &str, moves: &[String], lines: u32) -> Result<Vec<Analysis>> {
+        self.engine
+            .analyse_lines(fen, moves, Limit::Depth(self.depth), lines)
+    }
+
+    fn can_compare_alternatives(&self) -> bool {
+        true
+    }
 }
 
 impl Evaluator for Engine {
     fn eval(&mut self, fen: &str, moves: &[String]) -> Result<Analysis> {
         self.analyse(fen, moves, Limit::Depth(16))
+    }
+
+    fn eval_lines(&mut self, fen: &str, moves: &[String], lines: u32) -> Result<Vec<Analysis>> {
+        self.analyse_lines(fen, moves, Limit::Depth(16), lines)
+    }
+
+    fn can_compare_alternatives(&self) -> bool {
+        true
     }
 }
 
@@ -395,7 +428,23 @@ pub fn confirm_drillable(
             .best_move
             .as_deref()
             .is_some_and(|best| best == review.best);
-        if !confirmed {
+
+        // Being the best move is not enough: it has to be the only good move.
+        // A position with two equally good answers punishes a solver for
+        // finding the wrong one of two right ones, which teaches distrust
+        // rather than chess.
+        let unique = if confirmed && evaluator.can_compare_alternatives() {
+            let lines = evaluator.eval_lines(
+                &review.setup_fen,
+                std::slice::from_ref(&review.setup_move),
+                2,
+            )?;
+            is_sound_puzzle(&lines)
+        } else {
+            confirmed
+        };
+
+        if !confirmed || !unique {
             // Not certain enough to teach, so it stays in the report as a
             // note and stops being an exercise.
             review.severity = None;
@@ -413,6 +462,32 @@ pub fn confirm_drillable(
 /// The shape matches the Lichess export exactly — a position, the opponent move
 /// that created it, then the move to find — so generated puzzles flow through
 /// the same solving, scheduling and fluency code as downloaded ones.
+/// How far ahead of every alternative the answer has to be, in win
+/// probability, before a position is a fair puzzle.
+///
+/// Ten points is the same figure [`classify`] uses for an inaccuracy: below it
+/// the two moves are not meaningfully different, so calling one right and the
+/// other wrong is a coin toss dressed up as a lesson.
+pub const UNIQUE_MARGIN: f64 = 0.10;
+
+/// Whether a position has exactly one good answer.
+///
+/// `lines` are the engine's best moves in order, from the position the solver
+/// faces. A position with two equally good moves is a cook: the solver plays a
+/// fine move, is told they failed, and learns to distrust the trainer. That is
+/// worse than not asking at all.
+pub fn is_sound_puzzle(lines: &[crate::engine::Analysis]) -> bool {
+    let Some(best) = lines.first().and_then(|line| line.score) else {
+        return false;
+    };
+    let Some(second) = lines.get(1).and_then(|line| line.score) else {
+        // Nothing to choose between: either the move was forced, or the engine
+        // offered no alternative to compare against. Neither is a puzzle.
+        return false;
+    };
+    best.win_chance() - second.win_chance() >= UNIQUE_MARGIN
+}
+
 /// The theme marking a puzzle taken from the player's own game.
 pub const OWN_GAME_THEME: &str = "fromMyGame";
 
@@ -799,6 +874,67 @@ mod tests {
         assert_eq!(describe_move(&review, "f3g5"), "Ng5");
         // Something unplayable is shown as-is rather than swallowed.
         assert_eq!(describe_move(&review, "a1a8"), "a1a8");
+    }
+
+    fn line(score: Score, pv: &[&str]) -> crate::engine::Analysis {
+        crate::engine::Analysis {
+            best_move: pv.first().map(|m| (*m).to_owned()),
+            score: Some(score),
+            depth: 20,
+            pv: pv.iter().map(|m| (*m).to_owned()).collect(),
+        }
+    }
+
+    /// Two equally good moves make a cook: the solver plays a fine move, is
+    /// told they failed, and learns to distrust the trainer. That is worse
+    /// than never asking.
+    #[test]
+    fn a_position_with_two_good_answers_is_not_a_puzzle() {
+        let cooked = [
+            line(Score::Cp(300), &["d1h5", "g7g6"]),
+            line(Score::Cp(290), &["f3g5", "d7d5"]),
+        ];
+        assert!(!is_sound_puzzle(&cooked));
+    }
+
+    /// One move clearly ahead of everything else is what makes a position
+    /// worth asking about.
+    #[test]
+    fn one_move_clearly_ahead_is_a_puzzle() {
+        let sound = [
+            line(Score::Mate(2), &["d1h5", "g7g6", "h5e5"]),
+            line(Score::Cp(40), &["f3g5", "d7d5"]),
+        ];
+        assert!(is_sound_puzzle(&sound));
+    }
+
+    /// The margin is in win probability, not centipawns: a hundred points at
+    /// plus nine changes nothing about who is winning, and a position that is
+    /// already decided is not a test of anything.
+    #[test]
+    fn the_margin_is_measured_where_it_changes_the_result() {
+        // Both moves win overwhelmingly; the gap in centipawns is large but
+        // the gap in outcome is not.
+        let decided = [
+            line(Score::Cp(1500), &["a1a8", "b7b8"]),
+            line(Score::Cp(1200), &["a1a7", "b7b8"]),
+        ];
+        assert!(!is_sound_puzzle(&decided), "already winning either way");
+
+        // The same centipawn gap around equality does change the result.
+        let sharp = [
+            line(Score::Cp(150), &["d1h5", "g7g6"]),
+            line(Score::Cp(-150), &["f3g5", "d7d5"]),
+        ];
+        assert!(is_sound_puzzle(&sharp));
+    }
+
+    /// A forced move is not a puzzle, and neither is a position the engine
+    /// could say nothing about.
+    #[test]
+    fn nothing_to_choose_between_is_not_a_puzzle() {
+        assert!(!is_sound_puzzle(&[]));
+        assert!(!is_sound_puzzle(&[line(Score::Cp(300), &["d1h5", "g7g6"])]));
     }
 }
 

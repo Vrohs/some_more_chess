@@ -199,6 +199,65 @@ impl Engine {
     }
 
     /// Evaluate a position, optionally after playing `moves` from it.
+    /// Analyse a position asking for the best `lines` moves rather than one.
+    ///
+    /// A position only makes a fair puzzle when its best move is the *only*
+    /// good move. With one line the engine will happily name a move while an
+    /// equally good alternative sits beside it, and the solver who finds the
+    /// alternative is told they were wrong. Comparing the top two is the only
+    /// way to know.
+    pub fn analyse_lines(
+        &mut self,
+        fen: &str,
+        moves: &[String],
+        limit: Limit,
+        lines: u32,
+    ) -> Result<Vec<Analysis>> {
+        let lines = lines.max(1);
+        self.set_option("MultiPV", &lines.to_string())?;
+        let position = if moves.is_empty() {
+            format!("position fen {fen}")
+        } else {
+            format!("position fen {fen} moves {}", moves.join(" "))
+        };
+        self.send(&position)?;
+        self.send(&format!("go {}", limit.to_go_args()))?;
+
+        // Every line is re-sent at each depth, so the last report for each
+        // index is the deepest and the one worth keeping.
+        let mut found: Vec<Analysis> = Vec::new();
+        loop {
+            let line = self.read_line()?;
+            let line = line.trim();
+            if line.starts_with("bestmove ") {
+                break;
+            }
+            if !line.starts_with("info ") {
+                continue;
+            }
+            let Some(index) = multipv_index(line) else {
+                continue;
+            };
+            let mut entry = Analysis::default();
+            merge_info(&mut entry, line);
+            // The move is the head of the variation: `bestmove` only ever
+            // names the first line.
+            entry.best_move = entry.pv.first().cloned();
+            if entry.best_move.is_none() {
+                continue;
+            }
+            let slot = index.saturating_sub(1) as usize;
+            if found.len() <= slot {
+                found.resize_with(slot + 1, Analysis::default);
+            }
+            found[slot] = entry;
+        }
+        // Restore the default so ordinary analysis is unaffected.
+        self.set_option("MultiPV", "1")?;
+        found.retain(|entry| entry.best_move.is_some());
+        Ok(found)
+    }
+
     pub fn analyse(&mut self, fen: &str, moves: &[String], limit: Limit) -> Result<Analysis> {
         let position = if moves.is_empty() {
             format!("position fen {fen}")
@@ -258,6 +317,13 @@ impl Drop for Engine {
 pub const MIN_LIMITED_ELO: u32 = 1320;
 
 /// Parse one `info` line into the running analysis.
+/// The `multipv` index on an info line, if it carries one.
+fn multipv_index(line: &str) -> Option<u32> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let at = tokens.iter().position(|t| *t == "multipv")?;
+    tokens.get(at + 1)?.parse().ok()
+}
+
 fn merge_info(analysis: &mut Analysis, line: &str) {
     let tokens: Vec<&str> = line.split_whitespace().collect();
     let mut index = 0;

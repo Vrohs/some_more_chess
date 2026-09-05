@@ -271,3 +271,70 @@ fn a_drawn_endgame_really_holds() {
         omachess_core::endgame::Outcome::Achieved
     );
 }
+
+/// Multi-line analysis has to come back ordered, best first, with a move on
+/// every line — the uniqueness check compares the top two and is worthless if
+/// the order or the moves cannot be trusted.
+#[test]
+fn several_lines_come_back_ordered_best_first() {
+    use omachess_core::engine::Score;
+    let mut engine = engine_or_skip!();
+    engine.limit_strength(None).expect("full strength");
+
+    let lines = engine
+        .analyse_lines(START_FEN, &[], Limit::Depth(10), 3)
+        .expect("multi-line analysis");
+    assert_eq!(lines.len(), 3, "three lines were asked for");
+    for line in &lines {
+        assert!(line.best_move.is_some(), "every line names a move");
+        assert!(!line.pv.is_empty());
+    }
+
+    let win =
+        |line: &omachess_core::engine::Analysis| line.score.map(Score::win_chance).unwrap_or(0.0);
+    assert!(win(&lines[0]) >= win(&lines[1]), "best first");
+    assert!(win(&lines[1]) >= win(&lines[2]));
+
+    // Distinct moves, or there is nothing to compare.
+    let mut moves: Vec<_> = lines.iter().filter_map(|l| l.best_move.clone()).collect();
+    let before = moves.len();
+    moves.sort();
+    moves.dedup();
+    assert_eq!(moves.len(), before, "each line is a different move");
+}
+
+/// The whole point of the check: a position where two moves are equally good
+/// must be refused as a puzzle, and one with a single crushing answer accepted.
+#[test]
+fn cooked_positions_are_refused_and_forcing_ones_accepted() {
+    use omachess_core::review::is_sound_puzzle;
+    let mut engine = engine_or_skip!();
+    engine.limit_strength(None).expect("full strength");
+
+    // Scholar's mate is on: Qxf7 is mate and nothing else comes close.
+    let forced = "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 1";
+    let lines = engine
+        .analyse_lines(forced, &[], Limit::Depth(12), 2)
+        .expect("analysis");
+    assert!(
+        is_sound_puzzle(&lines),
+        "a position with one mating move is a fair puzzle, got {:?}",
+        lines
+            .iter()
+            .map(|l| (l.best_move.clone(), l.score))
+            .collect::<Vec<_>>()
+    );
+
+    // The opening position: a dozen reasonable moves, none clearly best.
+    let lines = engine
+        .analyse_lines(START_FEN, &[], Limit::Depth(12), 2)
+        .expect("analysis");
+    assert!(
+        !is_sound_puzzle(&lines),
+        "the starting position has no single right answer, got {:?}",
+        lines
+            .iter()
+            .map(|l| (l.best_move.clone(), l.score))
+            .collect::<Vec<_>>()
+    );
+}
