@@ -2,6 +2,7 @@
 
 mod board;
 mod charts;
+mod drill_view;
 mod endgame_view;
 mod engine_worker;
 mod pieces;
@@ -568,14 +569,17 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
                     describe_move(review, &review.best),
                     review.lost(),
                     review.phase.theme(),
+                    review.win_before,
                 )
             })
             .collect();
         drop(drillable);
         learned += own.len();
         store.insert_puzzles(&own)?;
-        for (id, ply, played, best, lost, phase) in origins {
-            store.record_drill_origin(&id, &source, played_at, ply, &played, &best, lost, phase)?;
+        for (id, ply, played, best, lost, phase, win_before) in origins {
+            store.record_drill_origin(
+                &id, &source, played_at, ply, &played, &best, lost, phase, win_before,
+            )?;
         }
 
         let opening = omachess_core::openings::identify(&game.moves);
@@ -689,8 +693,13 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         sounds.clone(),
         engine.clone(),
     );
-    let endgames =
-        endgame_view::EndgameView::new(store.clone(), pieces.clone(), sounds, engine.clone());
+    let endgames = endgame_view::EndgameView::new(
+        store.clone(),
+        pieces.clone(),
+        sounds.clone(),
+        engine.clone(),
+    );
+    let drills = drill_view::DrillView::new(store.clone(), pieces.clone(), sounds, engine.clone());
     let study = study_view::StudyView::new(store, pieces, engine);
 
     let progress = progress_view::ProgressView::new();
@@ -711,6 +720,12 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         Some("play"),
         "Play",
         "media-playback-start-symbolic",
+    );
+    stack.add_titled_with_icon(
+        drills.widget(),
+        Some("drill"),
+        "Drill",
+        "media-playlist-repeat-symbolic",
     );
     stack.add_titled_with_icon(
         endgames.widget(),
@@ -743,15 +758,19 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         let play = play.clone();
         let study = study.clone();
         let endgames = endgames.clone();
+        let drills = drills.clone();
         stack.connect_visible_child_name_notify(move |stack| {
             // Dropping any of these leaves live widgets whose handlers all hold
             // only weak references, so the tab silently stops responding.
-            let _keep_alive = (&play, &study, &endgames);
+            let _keep_alive = (&play, &study, &endgames, &drills);
             match stack.visible_child_name().as_deref() {
                 Some("progress") => progress.refresh(&trainer.progress_data()),
                 // Which openings are worth drilling depends on games that may
                 // have been played since this view was built.
                 Some("play") => play.refresh_openings(),
+                // What is worth replaying changes with every game imported or
+                // lost, so the list is rebuilt each time the tab is opened.
+                Some("drill") => drills.reload(),
                 _ => {}
             }
         });

@@ -16,6 +16,7 @@ pub mod ingest;
 pub mod openings;
 pub mod paths;
 pub mod pgn;
+pub mod playout;
 pub mod progress;
 pub mod puzzle;
 pub mod review;

@@ -100,6 +100,17 @@ CREATE TABLE IF NOT EXISTS settings (
 -- against; these do not, so what is worth keeping is the move, how long it
 -- took, and whatever the activity knows about the moment — the clock, the
 -- direction of travel, the phase.
+-- An attempt at playing a drill position out, rather than answering it.
+CREATE TABLE IF NOT EXISTS drill_attempts (
+    id           INTEGER PRIMARY KEY,
+    puzzle_id    TEXT NOT NULL,
+    attempted_at TEXT NOT NULL,
+    achieved     INTEGER NOT NULL,
+    moves        INTEGER NOT NULL,
+    result       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS drill_attempts_puzzle ON drill_attempts (puzzle_id, attempted_at);
+
 CREATE TABLE IF NOT EXISTS move_log (
     id         INTEGER PRIMARY KEY,
     session_id INTEGER,
@@ -314,6 +325,9 @@ pub struct DrillOrigin {
     /// Win probability given away, 0 to 1.
     pub lost: f64,
     pub phase: String,
+    /// Win probability before the mistake, from the player's side. -1 for
+    /// positions recorded before this was kept.
+    pub win_before: f64,
 }
 
 pub struct Store {
@@ -356,7 +370,7 @@ impl Store {
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as u32;
 
         // Steps are appended here and never renumbered or edited once shipped.
-        let steps: [&str; 6] = [
+        let steps: [&str; 7] = [
             // Imported games need an identity of their own so a re-import does
             // not duplicate them; games played in the app leave it empty.
             "ALTER TABLE games ADD COLUMN source TEXT NOT NULL DEFAULT ''",
@@ -391,6 +405,10 @@ impl Store {
             // end of one, and until now there was no way to tell them apart.
             "ALTER TABLE attempts ADD COLUMN session_id INTEGER;
              ALTER TABLE attempts ADD COLUMN index_in_session INTEGER NOT NULL DEFAULT 0",
+            // What the position was worth before the mistake. Without it a
+            // drill cannot state an objective, and playing on from a position
+            // with no idea whether you were winning teaches nothing.
+            "ALTER TABLE drill_positions ADD COLUMN win_before REAL NOT NULL DEFAULT -1",
         ];
 
         for (index, sql) in steps.iter().enumerate() {
@@ -926,6 +944,65 @@ impl Store {
         )? > 0)
     }
 
+    /// Drill positions worst first, so the ones that cost most come up first.
+    ///
+    /// Positions already played out successfully are dropped: the point is the
+    /// ones still going wrong.
+    pub fn drills_to_play(&self, limit: u32) -> Result<Vec<(String, DrillOrigin)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT d.puzzle_id, d.source, d.played_at, d.ply, d.played, d.best,
+                    d.lost, d.phase, d.win_before
+             FROM drill_positions d
+             WHERE NOT EXISTS (
+                   SELECT 1 FROM drill_attempts a
+                   WHERE a.puzzle_id = d.puzzle_id AND a.achieved = 1)
+             ORDER BY d.lost DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                DrillOrigin {
+                    source: r.get(1)?,
+                    played_at: r.get(2)?,
+                    ply: r.get(3)?,
+                    played: r.get(4)?,
+                    best: r.get(5)?,
+                    lost: r.get(6)?,
+                    phase: r.get(7)?,
+                    win_before: r.get(8)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn record_drill_attempt(
+        &self,
+        puzzle_id: &str,
+        at: DateTime<Utc>,
+        achieved: bool,
+        moves: u32,
+        result: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO drill_attempts (puzzle_id, attempted_at, achieved, moves, result)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![puzzle_id, at, achieved as i64, moves, result],
+        )?;
+        Ok(())
+    }
+
+    /// Attempts and successes at playing drill positions out.
+    pub fn drill_playout_record(&self) -> Result<(u32, u32)> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(achieved), 0) FROM drill_attempts",
+                [],
+                |r| Ok((r.get::<_, i64>(0)? as u32, r.get::<_, i64>(1)? as u32)),
+            )
+            .map_err(Into::into)
+    }
+
     // -- the move log ----------------------------------------------------
 
     /// Record one move made outside the puzzle trainer.
@@ -998,12 +1075,13 @@ impl Store {
         best: &str,
         lost: f64,
         phase: &str,
+        win_before: f64,
     ) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO drill_positions
-             (puzzle_id, source, played_at, ply, played, best, lost, phase)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![puzzle_id, source, played_at, ply, played, best, lost, phase],
+             (puzzle_id, source, played_at, ply, played, best, lost, phase, win_before)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![puzzle_id, source, played_at, ply, played, best, lost, phase, win_before],
         )?;
         Ok(())
     }
@@ -1013,7 +1091,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT source, played_at, ply, played, best, lost, phase
+                "SELECT source, played_at, ply, played, best, lost, phase, win_before
                  FROM drill_positions WHERE puzzle_id = ?1",
                 params![puzzle_id],
                 |r| {
@@ -1025,6 +1103,7 @@ impl Store {
                         best: r.get(4)?,
                         lost: r.get(5)?,
                         phase: r.get(6)?,
+                        win_before: r.get(7)?,
                     })
                 },
             )
