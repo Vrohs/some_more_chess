@@ -917,6 +917,7 @@ dependencies = [
  "chrono",
  "gtk4",
  "libadwaita",
+ "libc",
  "omachess-core",
  "resvg",
  "rs-fsrs",

@@ -19,3 +19,6 @@ libadwaita = { version = "0.9", features = ["v1_5"] }
 # Pure-Rust SVG rasteriser: librsvg no longer ships a gdk-pixbuf loader, so GTK
 # cannot rasterise SVG piece sets on its own.
 resvg = "0.48"
+# Only to hand SIGPIPE back to the kernel: without it, piping any command of
+# ours into `head` panics, and a fault log that records that is crying wolf.
+libc = "0.2"

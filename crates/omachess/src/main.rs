@@ -49,6 +49,17 @@ fn main() -> ExitCode {
         gtk4::glib::log_default_handler(domain, level, Some(message));
     });
 
+    // Rust masks SIGPIPE and turns a closed pipe into a panic instead. That
+    // makes `omachess doctor | head` record a panic in the fault log and then
+    // tell the reader "the window closed on you", which is a lie, and a fault
+    // log that cries wolf is worse than none. Hand the signal back to the
+    // kernel and the process exits quietly, the way every other Unix tool does.
+    //
+    // Safe: setting a disposition to SIG_DFL before any thread is started.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("ingest") => command_ingest(args.get(1).map(PathBuf::from)),
@@ -398,7 +409,7 @@ fn command_doctor() -> anyhow::Result<()> {
             println!(
                 "  {:8} {count:4}   most recent {}",
                 fault.label(),
-                latest.format("%Y-%m-%d %H:%M")
+                latest.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
             );
         }
         println!();
@@ -406,7 +417,7 @@ fn command_doctor() -> anyhow::Result<()> {
         for record in faults.iter().rev().take(5) {
             println!(
                 "    {} [{}] {} — {}",
-                record.at.format("%m-%d %H:%M"),
+                record.at.with_timezone(&chrono::Local).format("%m-%d %H:%M"),
                 record.fault.label(),
                 record.site,
                 record.message.lines().next().unwrap_or("")

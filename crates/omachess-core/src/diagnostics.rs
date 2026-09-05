@@ -241,6 +241,14 @@ pub fn record_toolkit(site: &str, message: impl std::fmt::Display) {
     );
 }
 
+/// Whether a panic is just a reader that stopped reading.
+///
+/// Matched on the message rather than the site, because the site is a path
+/// inside the standard library that moves with every toolchain.
+fn is_broken_pipe(message: &str) -> bool {
+    message.contains("Broken pipe")
+}
+
 /// Catch panics into the log, keeping whatever handler was already installed
 /// so the message still reaches the terminal.
 ///
@@ -260,6 +268,15 @@ pub fn install_panic_hook() {
             .map(|s| (*s).to_owned())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "panic with no message".to_owned());
+        if is_broken_pipe(&message) {
+            // Someone piped us into `head` and stopped reading. That is not a
+            // fault, and recording it makes the log tell the reader the window
+            // closed on them when it did not. `main` hands SIGPIPE back to the
+            // kernel so this should never be reached; it is here because a log
+            // that cries wolf costs more than the check does.
+            previous(info);
+            return;
+        }
         append(
             &default_path(),
             &Record {
@@ -286,6 +303,19 @@ mod tests {
             message: message.into(),
             version: "0.1.0".into(),
         }
+    }
+
+    /// The fault log's whole value is that everything in it is worth reading.
+    /// A closed pipe is not, and it arrived here three times in one afternoon
+    /// from nothing worse than `omachess doctor | head`.
+    #[test]
+    fn a_closed_pipe_is_not_a_fault() {
+        assert!(is_broken_pipe(
+            "failed printing to stdout: Broken pipe (os error 32)"
+        ));
+        assert!(!is_broken_pipe(
+            "called `Option::unwrap()` on a `None` value"
+        ));
     }
 
     #[test]
