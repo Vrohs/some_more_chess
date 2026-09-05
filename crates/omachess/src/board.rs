@@ -322,6 +322,15 @@ impl BoardView {
         *self.handler.borrow_mut() = Some(Box::new(handler));
     }
 
+    /// Click a square, exactly as a press and release on it would.
+    ///
+    /// This exists so a test can enter through the board rather than through
+    /// the view's handler: the bug worth catching is a handler that was never
+    /// connected, and calling the handler directly cannot see that.
+    pub(crate) fn click(&self, square: Square) {
+        self.on_click(square);
+    }
+
     fn on_click(&self, square: Square) {
         if let Some(handler) = self.handler.borrow().as_ref() {
             handler(square);

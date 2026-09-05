@@ -9,6 +9,7 @@ mod pieces;
 mod play_view;
 mod progress_view;
 mod promotion;
+mod selftest;
 mod sound;
 mod study_view;
 mod style;
@@ -56,6 +57,7 @@ fn main() -> ExitCode {
         Some("games") => command_games(),
         Some("doctor") => command_doctor(),
         Some("today") => command_today(),
+        Some("selftest") => command_selftest(),
         Some("--version" | "-V" | "version") => {
             println!("{}", describe_build());
             Ok(())
@@ -93,6 +95,7 @@ USAGE:
     omachess games           Show how well you have been playing the engine
     omachess today           What to train now, and the measurement behind it
     omachess --version       Which build is running, and from where
+    omachess selftest        Drive the real views and report what works
     omachess doctor          Faults recorded, and the raw data behind training
     omachess export <FILE>   Write your history to a file you can keep
     omachess restore <FILE>  Merge a history file back in
@@ -712,6 +715,32 @@ fn run_app(study: Option<PathBuf>) -> anyhow::Result<()> {
     });
     app.run_with_args::<&str>(&[]);
     Ok(())
+}
+
+/// Drive the real views and report what held.
+///
+/// A distinct application id, so this never activates the window you are
+/// using and never shares its database.
+fn command_selftest() -> anyhow::Result<()> {
+    let app = adw::Application::builder()
+        .application_id("dev.omachess.Omachess.SelfTest")
+        .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    let passed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let result = passed.clone();
+    app.connect_activate(move |app| {
+        style::install();
+        let pieces = pieces::PieceSet::discover(&paths::pieces_dir()).map(std::rc::Rc::new);
+        let sounds = std::rc::Rc::new(sound::Sounds::new());
+        result.set(selftest::run(pieces, sounds));
+        app.quit();
+    });
+    app.run_with_args::<&str>(&[]);
+    if passed.get() {
+        Ok(())
+    } else {
+        anyhow::bail!("the self-test found something broken")
+    }
 }
 
 fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::Result<()> {

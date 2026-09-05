@@ -77,6 +77,15 @@ way that has nothing to do with getting better — and solve time is the number
 this application exists to measure. The answer is revealed after two wrong
 moves, by which point the attempt already counts as failed.
 
+## Checking the interface actually works
+
+    omachess selftest
+
+Builds the real views against a throwaway database and clicks the real board.
+Every defect this project has shipped lived in the wiring between a click and
+the logic underneath — a board that answered a drag and ignored a click passed
+the whole unit suite, because no test ever moved a piece.
+
 ## Running the build you just made
 
 The desktop entry runs `omachess` from `PATH`. If a *copy* is sitting there it

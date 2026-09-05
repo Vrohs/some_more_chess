@@ -247,6 +247,11 @@ impl Trainer {
         trainer
     }
 
+    /// The board itself, so a test can click it the way a person does.
+    pub(crate) fn board(&self) -> &Rc<BoardView> {
+        &self.board
+    }
+
     pub fn widget(&self) -> &GtkBox {
         &self.root
     }
@@ -399,7 +404,7 @@ impl Trainer {
     }
 
     /// Begin the session. Only the first puzzle needs this.
-    fn begin_solving(&self) {
+    pub(crate) fn begin_solving(&self) {
         // A sitting is opened once, on the first puzzle, so every attempt can
         // be filed by how deep into the session it was. Whether the twentieth
         // solve goes worse than the second is a training question, and it
@@ -566,7 +571,7 @@ impl Trainer {
     }
 
     /// True only once the solver has pressed Start on the current puzzle.
-    fn solving(&self) -> bool {
+    pub(crate) fn solving(&self) -> bool {
         self.current
             .borrow()
             .as_ref()
@@ -608,7 +613,7 @@ impl Trainer {
     /// Offer a move, asking which piece first when a pawn reaches the last
     /// rank. A puzzle whose answer is an underpromotion cannot be solved by a
     /// board that always queens.
-    fn offer_move(self: &Rc<Self>, from: Square, to: Square) {
+    pub(crate) fn offer_move(self: &Rc<Self>, from: Square, to: Square) {
         let choices = {
             let current = self.current.borrow();
             match current.as_ref() {

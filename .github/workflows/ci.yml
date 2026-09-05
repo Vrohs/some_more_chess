@@ -35,3 +35,11 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace
+
+      # The interface layer is where every shipped defect has lived, and none
+      # of it is reachable from a unit test. This builds the real views and
+      # clicks the real board, under a virtual display.
+      - name: Interface self-test
+        run: |
+          sudo apt-get install -y xvfb
+          xvfb-run -a cargo run --release -- selftest

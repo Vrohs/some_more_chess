@@ -212,6 +212,11 @@ impl DrillView {
         view
     }
 
+    /// The board itself, so a test can click it the way a person does.
+    pub(crate) fn board(&self) -> &Rc<BoardView> {
+        &self.board
+    }
+
     pub fn widget(&self) -> &GtkBox {
         &self.root
     }
@@ -337,7 +342,7 @@ impl DrillView {
         });
     }
 
-    fn begin(&self) {
+    pub(crate) fn begin(&self) {
         let Some((_, _, fen)) = self.entry() else {
             self.status.set_label("Nothing to play.");
             return;
@@ -382,7 +387,7 @@ impl DrillView {
     }
 
     /// Clicking a piece and then where it should go.
-    fn on_square(self: &Rc<Self>, square: Square) {
+    pub(crate) fn on_square(self: &Rc<Self>, square: Square) {
         if self.thinking.get() || self.settled.get() {
             return;
         }
