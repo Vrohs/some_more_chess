@@ -97,6 +97,12 @@ const DEFAULT_CSS: &str = r#"
 .omachess-coord.on-light { color: #6b4423; }
 .omachess-coord.on-dark  { color: #e9cfa6; }
 .omachess-status { font-size: 15px; }
+/* The promotion choices are figurine glyphs, which need room to be readable. */
+.omachess-promotion {
+    font-size: 26px;
+    padding: 2px 8px;
+    min-width: 40px;
+}
 /* The clock is read at a glance under pressure, so it is large, monospaced so
    the digits do not shift as they count, and turns red once the move is being
    made on a low clock. */

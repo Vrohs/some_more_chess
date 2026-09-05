@@ -81,6 +81,25 @@ pub fn whose_turn(game: &Game) -> Turn {
 ///
 /// `prefer` is a UCI string to disambiguate promotions when one is known,
 /// such as a puzzle's expected move; otherwise a queen is assumed.
+/// The promotions available for a move, in the order a player expects to see
+/// them. Empty when the move is not a promotion.
+///
+/// Defaulting to a queen is right almost always and wrong exactly when it
+/// matters — underpromoting to a knight for a fork, or to a rook to avoid
+/// stalemating. A board that never asks cannot play those positions at all.
+pub fn promotion_choices(position: &Chess, from: Square, to: Square) -> Vec<Role> {
+    const ORDER: [Role; 4] = [Role::Queen, Role::Rook, Role::Bishop, Role::Knight];
+    let mut found: Vec<Role> = position
+        .legal_moves()
+        .into_iter()
+        .filter(|mv| mv.from() == Some(from) && mv.to() == to)
+        .filter_map(|mv| mv.promotion())
+        .collect();
+    found.sort_by_key(|role| ORDER.iter().position(|r| r == role).unwrap_or(usize::MAX));
+    found.dedup();
+    found
+}
+
 pub fn find_move(position: &Chess, from: Square, to: Square, prefer: Option<&str>) -> Option<Move> {
     let mover = position.turn();
     let mut candidates: Vec<Move> = position
@@ -543,6 +562,38 @@ mod tests {
             find_move(&pos, Square::E5, Square::D6, None).expect("en passant must be reachable");
         assert!(mv.is_en_passant());
         assert!(mv.is_capture(), "en passant is a capture");
+    }
+
+    /// A promotion has to be offered rather than assumed. Underpromotion is
+    /// rare and decisive: a knight that forks, or a rook that avoids
+    /// stalemating the opponent, and a board that never asks cannot play
+    /// either of them.
+    #[test]
+    fn a_promotion_offers_every_piece_queen_first() {
+        let pos = position("8/P7/8/8/8/8/8/K6k w - - 0 1");
+        let choices = promotion_choices(&pos, Square::A7, Square::A8);
+        assert_eq!(
+            choices,
+            vec![Role::Queen, Role::Rook, Role::Bishop, Role::Knight],
+            "queen first, because it is right almost always"
+        );
+    }
+
+    /// An ordinary move must not raise the question, or every move would stop
+    /// to ask about a promotion that is not happening.
+    #[test]
+    fn an_ordinary_move_offers_nothing() {
+        let pos = position("8/P7/8/8/8/8/8/K6k w - - 0 1");
+        assert!(promotion_choices(&pos, Square::A1, Square::A2).is_empty());
+        assert!(promotion_choices(&pos, Square::A1, Square::B1).is_empty());
+    }
+
+    /// A capture on the last rank is still a promotion, and it is exactly
+    /// where underpromotion tends to matter.
+    #[test]
+    fn a_capturing_promotion_is_offered_too() {
+        let pos = position("1r6/P7/8/8/8/8/8/K6k w - - 0 1");
+        assert_eq!(promotion_choices(&pos, Square::A7, Square::B8).len(), 4);
     }
 
     #[test]

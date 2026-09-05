@@ -85,6 +85,7 @@ pub struct PlayView {
     drill: RefCell<Option<Drill>>,
     drill_button: Button,
     add_button: Button,
+    plan_box: GtkBox,
     thinking: Cell<bool>,
 }
 
@@ -209,6 +210,14 @@ impl PlayView {
             .build();
         review_scroll.set_visible(false);
 
+        // Before a game there is nothing to say about the position, and the
+        // panel was simply empty. What to train is the useful thing to put in
+        // front of someone who has just opened the application.
+        let plan_box = GtkBox::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(4)
+            .build();
+
         let moves_heading = Label::builder().label("Moves").halign(Align::Start).build();
         moves_heading.add_css_class("heading");
 
@@ -216,10 +225,14 @@ impl PlayView {
         // playing, how long you spend, and — once the game is over — every
         // position you misjudged. Nothing here reveals an evaluation while the
         // game is still running.
+        // The board is limited by the window height, so on a wide screen the
+        // space left over is the panel's. It expands to take it rather than
+        // reserving a column and leaving the rest blank.
         let panel = GtkBox::builder()
             .orientation(Orientation::Vertical)
             .spacing(8)
-            .width_request(240)
+            .width_request(340)
+            .hexpand(true)
             .build();
         panel.append(&controls);
         panel.append(&clock_mine);
@@ -233,6 +246,7 @@ impl PlayView {
         panel.append(&review_scroll);
         panel.append(&drill_button);
         panel.append(&add_button);
+        panel.append(&plan_box);
 
         let panel_scroll = ScrolledWindow::builder()
             .child(&panel)
@@ -289,6 +303,7 @@ impl PlayView {
             drill: RefCell::new(None),
             drill_button,
             add_button,
+            plan_box,
             thinking: Cell::new(false),
         });
 
@@ -357,6 +372,18 @@ impl PlayView {
     }
 
     fn show_idle_state(&self) {
+        self.show_plan();
+        // An empty board reads as a broken application, not as a waiting one.
+        // Nothing ever put a position here before a game began.
+        if self.game.borrow().is_none() {
+            let side = if self.side.selected() == 0 {
+                Color::White
+            } else {
+                Color::Black
+            };
+            self.board.set_orientation(side);
+            self.board.set_position(&shakmaty::Chess::default());
+        }
         match &self.worker {
             Some(worker) => {
                 self.status.set_label("Ready when you are.");
@@ -584,6 +611,7 @@ impl PlayView {
         *self.clock.borrow_mut() = self.chosen_control().map(omachess_core::clock::Clock::new);
         self.turn_started.set(Some(Instant::now()));
         self.show_clocks();
+        self.show_plan();
         self.resign.set_visible(true);
         self.review_scroll.set_visible(false);
         clear_list(&self.review_list);
@@ -641,9 +669,7 @@ impl PlayView {
             return;
         }
         self.board.select(None);
-        if let Some(mv) = self.find_move(from, square) {
-            self.play_player_move(&mv);
-        }
+        self.offer_move(from, square);
     }
 
     fn on_drag(self: &Rc<Self>, from: Square, to: Square) {
@@ -662,9 +688,7 @@ impl PlayView {
             trace(&format!("no legal move from {from:?} to {to:?}"));
         }
         self.board.select(None);
-        if let Some(mv) = self.find_move(from, to) {
-            self.play_player_move(&mv);
-        }
+        self.offer_move(from, to);
     }
 
     /// Which sound a move deserves, judged before the position moves on.
@@ -717,6 +741,90 @@ impl PlayView {
     fn find_move(&self, from: Square, to: Square) -> Option<Move> {
         let game = self.game.borrow();
         omachess_core::game::find_move(game.as_ref()?.position(), from, to, None)
+    }
+
+    /// Put today's session in the panel while there is no game to describe.
+    fn show_plan(&self) {
+        while let Some(child) = self.plan_box.first_child() {
+            self.plan_box.remove(&child);
+        }
+        if self.game.borrow().is_some() {
+            self.plan_box.set_visible(false);
+            return;
+        }
+        let plan = omachess_core::plan::todays_plan(&self.store.borrow()).unwrap_or_default();
+        if plan.is_empty() {
+            self.plan_box.set_visible(false);
+            return;
+        }
+        self.plan_box.set_visible(true);
+
+        let heading = Label::builder().label("Today").halign(Align::Start).build();
+        heading.add_css_class("heading");
+        self.plan_box.append(&heading);
+
+        for (index, step) in plan.iter().enumerate() {
+            let line = Label::builder()
+                .label(format!(
+                    "{}. {}  ({} min)",
+                    index + 1,
+                    step.headline(),
+                    step.minutes
+                ))
+                .halign(Align::Start)
+                .wrap(true)
+                .build();
+            self.plan_box.append(&line);
+            // The reason is the part worth reading; without it this is a list
+            // of chores rather than a session.
+            let why = Label::builder()
+                .label(&step.why)
+                .halign(Align::Start)
+                .wrap(true)
+                .max_width_chars(56)
+                .build();
+            why.add_css_class("dim-label");
+            self.plan_box.append(&why);
+        }
+    }
+
+    /// Play a move, asking which piece first when a pawn reaches the last rank.
+    ///
+    /// Every route onto the board goes through here, so the question is asked
+    /// once however the piece was moved.
+    fn offer_move(self: &Rc<Self>, from: Square, to: Square) {
+        let choices = {
+            let game = self.game.borrow();
+            match game.as_ref() {
+                Some(game) => omachess_core::game::promotion_choices(game.position(), from, to),
+                None => Vec::new(),
+            }
+        };
+        if choices.len() > 1 {
+            let white = self
+                .game
+                .borrow()
+                .as_ref()
+                .map(|game| game.player() == Color::White)
+                .unwrap_or(true);
+            let view = self.clone();
+            crate::promotion::ask(self.board.widget(), &choices, white, move |role| {
+                let prefer = promotion_uci(from, to, role);
+                let found = {
+                    let game = view.game.borrow();
+                    game.as_ref().and_then(|game| {
+                        omachess_core::game::find_move(game.position(), from, to, Some(&prefer))
+                    })
+                };
+                if let Some(mv) = found {
+                    view.play_player_move(&mv);
+                }
+            });
+            return;
+        }
+        if let Some(mv) = self.find_move(from, to) {
+            self.play_player_move(&mv);
+        }
     }
 
     fn play_player_move(&self, mv: &Move) {
@@ -1465,6 +1573,19 @@ fn control_at(index: usize) -> Option<omachess_core::clock::TimeControl> {
     omachess_core::clock::PRESETS
         .get(index)
         .map(|(_, control)| *control)
+}
+
+/// A promotion in the notation `find_move` disambiguates with.
+pub(crate) fn promotion_uci(from: Square, to: Square, role: shakmaty::Role) -> String {
+    format!(
+        "{from}{to}{}",
+        match role {
+            shakmaty::Role::Rook => "r",
+            shakmaty::Role::Bishop => "b",
+            shakmaty::Role::Knight => "n",
+            _ => "q",
+        }
+    )
 }
 
 /// Minutes and seconds, and tenths once it is nearly gone — which is when a

@@ -175,6 +175,16 @@ impl EndgameView {
             }
         });
 
+        // Clicking a piece and then its destination has to work too. Wiring
+        // only the drag left this board silently ignoring half the ways a
+        // person moves a piece, with nothing on screen to say why.
+        let weak: Weak<Self> = Rc::downgrade(&view);
+        view.board.connect_move(move |square| {
+            if let Some(view) = weak.upgrade() {
+                view.on_square(square);
+            }
+        });
+
         if view.worker.is_some() {
             let weak: Weak<Self> = Rc::downgrade(&view);
             glib::timeout_add_local(
@@ -281,11 +291,63 @@ impl EndgameView {
         });
     }
 
-    /// The player's move.
-    fn play(&self, from: Square, to: Square) {
+    /// Clicking a piece and then where it should go.
+    fn on_square(self: &Rc<Self>, square: Square) {
         if self.thinking.get() || self.settled.get() {
             return;
         }
+        let Some(from) = self.board.selected() else {
+            // Only own pieces can be picked up, or the first click selects an
+            // empty square and the second looks like it did nothing.
+            if self.has_own_piece(square) {
+                self.board.select(Some(square));
+            }
+            return;
+        };
+        self.board.select(None);
+        if from != square {
+            self.play(from, square);
+        }
+    }
+
+    /// Whether the player owns the piece on this square.
+    fn has_own_piece(&self, square: Square) -> bool {
+        let game = self.game.borrow();
+        let Some(game) = game.as_ref() else {
+            return false;
+        };
+        game.position().board().color_at(square) == Some(game.player())
+    }
+
+    /// The player's move, asking first when a pawn reaches the last rank.
+    fn play(self: &Rc<Self>, from: Square, to: Square) {
+        if self.thinking.get() || self.settled.get() {
+            return;
+        }
+        let choices = {
+            let game = self.game.borrow();
+            match game.as_ref() {
+                Some(game) => omachess_core::game::promotion_choices(game.position(), from, to),
+                None => Vec::new(),
+            }
+        };
+        if choices.len() > 1 {
+            let white = self
+                .game
+                .borrow()
+                .as_ref()
+                .map(|game| game.player() == Color::White)
+                .unwrap_or(true);
+            let view = self.clone();
+            crate::promotion::ask(self.board.widget(), &choices, white, move |role| {
+                view.play_promoting(from, to, Some(role));
+            });
+            return;
+        }
+        self.play_promoting(from, to, None);
+    }
+
+    fn play_promoting(&self, from: Square, to: Square, promotion: Option<shakmaty::Role>) {
         let mut slot = self.game.borrow_mut();
         let Some(game) = slot.as_mut() else {
             return;
@@ -293,7 +355,18 @@ impl EndgameView {
         if game.position().turn() != Color::White {
             return;
         }
-        let Some(mv) = find_move(game.position(), from, to, None) else {
+        let prefer = promotion.map(|role| {
+            format!(
+                "{from}{to}{}",
+                match role {
+                    shakmaty::Role::Rook => "r",
+                    shakmaty::Role::Bishop => "b",
+                    shakmaty::Role::Knight => "n",
+                    _ => "q",
+                }
+            )
+        });
+        let Some(mv) = find_move(game.position(), from, to, prefer.as_deref()) else {
             self.board.set_wrong(true);
             return;
         };

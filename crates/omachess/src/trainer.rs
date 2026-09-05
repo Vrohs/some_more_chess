@@ -78,7 +78,7 @@ impl Trainer {
         let status = Label::builder()
             .label("Loading…")
             .wrap(true)
-            .max_width_chars(40)
+            .max_width_chars(26)
             .halign(Align::Start)
             .build();
         status.add_css_class("omachess-status");
@@ -89,7 +89,7 @@ impl Trainer {
         let detail = Label::builder()
             .halign(Align::Start)
             .wrap(true)
-            .max_width_chars(48)
+            .max_width_chars(34)
             .build();
         detail.add_css_class("dim-label");
 
@@ -103,13 +103,13 @@ impl Trainer {
         let origin = Label::builder()
             .halign(Align::Start)
             .wrap(true)
-            .max_width_chars(46)
+            .max_width_chars(34)
             .build();
         origin.add_css_class("dim-label");
         let mode_caption = Label::builder()
             .halign(Align::Start)
             .wrap(true)
-            .max_width_chars(40)
+            .max_width_chars(34)
             .build();
         mode_caption.add_css_class("dim-label");
 
@@ -156,9 +156,33 @@ impl Trainer {
             .child(board.widget())
             .build();
 
-        root.append(&header);
-        root.append(&framed);
-        root.append(&detail);
+        // Board on the left, everything about it on the right — the same shape
+        // as every other tab, and it stops a wide window putting the board in
+        // the middle with blank space on both sides.
+        let panel = GtkBox::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(8)
+            .width_request(300)
+            .build();
+        panel.append(&header);
+        panel.append(&detail);
+
+        // Scrolled so the panel can be narrower than the text wants to be:
+        // without it a half-width window pushes the labels off the edge.
+        let panel_scroll = gtk4::ScrolledWindow::builder()
+            .child(&panel)
+            .hscrollbar_policy(gtk4::PolicyType::Never)
+            .propagate_natural_width(false)
+            .hexpand(true)
+            .build();
+
+        let columns = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(16)
+            .build();
+        columns.append(&framed);
+        columns.append(&panel_scroll);
+        root.append(&columns);
 
         let trainer = Rc::new(Self {
             store,
@@ -451,13 +475,8 @@ impl Trainer {
             return;
         }
 
-        match self.find_move(from, square) {
-            Some(mv) => {
-                self.board.select(None);
-                self.offer(&mv);
-            }
-            None => self.board.select(None),
-        }
+        self.board.select(None);
+        self.offer_move(from, square);
     }
 
     /// The expected move in algebraic notation, for revealing the answer.
@@ -543,9 +562,7 @@ impl Trainer {
             return;
         }
         self.board.select(None);
-        if let Some(mv) = self.find_move(from, to) {
-            self.offer(&mv);
-        }
+        self.offer_move(from, to);
     }
 
     /// True only once the solver has pressed Start on the current puzzle.
@@ -586,6 +603,51 @@ impl Trainer {
             to,
             current.attempt.expected(),
         )
+    }
+
+    /// Offer a move, asking which piece first when a pawn reaches the last
+    /// rank. A puzzle whose answer is an underpromotion cannot be solved by a
+    /// board that always queens.
+    fn offer_move(self: &Rc<Self>, from: Square, to: Square) {
+        let choices = {
+            let current = self.current.borrow();
+            match current.as_ref() {
+                Some(current) => {
+                    omachess_core::game::promotion_choices(current.attempt.position(), from, to)
+                }
+                None => Vec::new(),
+            }
+        };
+        if choices.len() > 1 {
+            let white = self
+                .current
+                .borrow()
+                .as_ref()
+                .map(|current| current.attempt.position().turn() == shakmaty::Color::White)
+                .unwrap_or(true);
+            let trainer = self.clone();
+            crate::promotion::ask(self.board.widget(), &choices, white, move |role| {
+                let prefer = crate::play_view::promotion_uci(from, to, role);
+                let found = {
+                    let current = trainer.current.borrow();
+                    current.as_ref().and_then(|current| {
+                        omachess_core::game::find_move(
+                            current.attempt.position(),
+                            from,
+                            to,
+                            Some(&prefer),
+                        )
+                    })
+                };
+                if let Some(mv) = found {
+                    trainer.offer(&mv);
+                }
+            });
+            return;
+        }
+        if let Some(mv) = self.find_move(from, to) {
+            self.offer(&mv);
+        }
     }
 
     fn offer(self: &Rc<Self>, mv: &Move) {

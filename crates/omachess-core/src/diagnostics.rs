@@ -194,6 +194,20 @@ pub fn summarise(records: &[Record]) -> Vec<(Fault, usize, DateTime<Utc>)> {
     out
 }
 
+/// The most recent fault, if any have been recorded.
+///
+/// A log nobody knows to read is the same as no log. This is what the window
+/// polls so a failure reaches the person it happened to.
+pub fn latest(path: &Path) -> Option<Record> {
+    read(path).pop()
+}
+
+/// How many faults have been recorded. Cheap enough to poll, and a change in
+/// the count is what says something new went wrong.
+pub fn count(path: &Path) -> usize {
+    read(path).len()
+}
+
 /// The default location, beside the ordinary log.
 pub fn default_path() -> PathBuf {
     crate::paths::cache_dir().join("diagnostics.jsonl")

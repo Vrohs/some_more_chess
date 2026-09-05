@@ -8,6 +8,7 @@ mod engine_worker;
 mod pieces;
 mod play_view;
 mod progress_view;
+mod promotion;
 mod sound;
 mod study_view;
 mod style;
@@ -729,6 +730,44 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
 
     play.refresh_openings();
 
+    // A fault written to a file nobody knows to read is the same as no fault
+    // report at all. This puts the most recent one in front of the person it
+    // happened to, which is the whole difference between "it broke" and "only
+    // god knows what went wrong".
+    let problem = gtk4::Label::builder()
+        .halign(gtk4::Align::Start)
+        .wrap(true)
+        .visible(false)
+        .build();
+    problem.add_css_class("error");
+
+    {
+        let problem = problem.clone();
+        let seen = std::cell::Cell::new(usize::MAX);
+        gtk4::glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
+            let path = omachess_core::diagnostics::default_path();
+            let count = omachess_core::diagnostics::count(&path);
+            // Only the first poll establishes the baseline; after that any
+            // increase is something that just happened.
+            if seen.get() == usize::MAX {
+                seen.set(count);
+                return gtk4::glib::ControlFlow::Continue;
+            }
+            if count > seen.get() {
+                seen.set(count);
+                if let Some(record) = omachess_core::diagnostics::latest(&path) {
+                    problem.set_label(&format!(
+                        "Something went wrong in {} — {}. Run `omachess doctor` for the rest.",
+                        record.site,
+                        record.message.lines().next().unwrap_or("no detail")
+                    ));
+                    problem.set_visible(true);
+                }
+            }
+            gtk4::glib::ControlFlow::Continue
+        });
+    }
+
     let stack = adw::ViewStack::new();
     stack.add_titled_with_icon(
         trainer.widget(),
@@ -808,6 +847,12 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
 
     let layout = GtkBox::builder().orientation(Orientation::Vertical).build();
     layout.append(&header);
+    // Directly under the header, so a fault is impossible to miss and does not
+    // depend on which tab happens to be open.
+    problem.set_margin_start(12);
+    problem.set_margin_end(12);
+    problem.set_margin_top(6);
+    layout.append(&problem);
     layout.append(&stack);
     stack.set_vexpand(true);
 
