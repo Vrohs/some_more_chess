@@ -6,6 +6,7 @@
 
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Label, Orientation};
+use omachess_core::plan::{Step, SESSION_MINUTES};
 use omachess_core::progress::{
     EndgameRecord, GamePoint, Improvement, OpeningRecord, PlayTrend, PressureRecord, SlopePoint,
     Transfer, Weakness, MIN_GAMES, MIN_OPENING_GAMES, MIN_PRESSURE_MOVES, MIN_RATING_POINTS,
@@ -30,6 +31,7 @@ pub struct ProgressData {
     pub endgames: Vec<EndgameRecord>,
     pub openings: Vec<OpeningRecord>,
     pub pressure: Option<PressureRecord>,
+    pub plan: Vec<Step>,
     pub repeat_mode: bool,
 }
 
@@ -61,6 +63,24 @@ impl ProgressView {
 
         // The diagnosis leads: what keeps going wrong is more use than any
         // number, because it is the only thing here you can act on tomorrow.
+        // First, and above every finding below it: the findings are the
+        // evidence, this is what to do about them. A page that only diagnoses
+        // leaves the reader to work out their own session, which is the part
+        // they came here to be told.
+        self.root.append(&section_title("Today"));
+        if data.plan.is_empty() {
+            self.root.append(&caption("Nothing to suggest yet."));
+        } else {
+            let total: u32 = data.plan.iter().map(|step| step.minutes).sum();
+            self.root.append(&caption(&format!(
+                "About {total} minutes, inside a {SESSION_MINUTES} minute session. \
+                 Ordered by how directly each piece bears on your own games."
+            )));
+            for (index, step) in data.plan.iter().enumerate() {
+                self.root.append(&plan_row(index + 1, step));
+            }
+        }
+
         self.root.append(&section_title("What keeps costing you"));
         if data.weaknesses.is_empty() {
             self.root.append(&caption(&format!(
@@ -450,6 +470,46 @@ fn efficiency_text(best: Option<u32>, optimal: Option<u32>) -> String {
         (Some(taken), Some(optimal)) => format!("  best {taken} vs {optimal} needed"),
         _ => String::new(),
     }
+}
+
+/// One item of today's session: what to do, how long, and the number that put
+/// it there.
+fn plan_row(position: usize, step: &Step) -> GtkBox {
+    let row = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(2)
+        .build();
+
+    let heading = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    let title = Label::builder()
+        .label(format!("{position}. {}", step.headline()))
+        .halign(Align::Start)
+        .hexpand(true)
+        .wrap(true)
+        .build();
+    title.add_css_class("heading");
+    heading.append(&title);
+    let minutes = Label::builder()
+        .label(format!("{} min", step.minutes))
+        .halign(Align::End)
+        .build();
+    minutes.add_css_class("dim-label");
+    heading.append(&minutes);
+    row.append(&heading);
+
+    // The reason is the point: without it this is a list of chores.
+    let why = Label::builder()
+        .label(&step.why)
+        .halign(Align::Start)
+        .wrap(true)
+        .max_width_chars(72)
+        .build();
+    why.add_css_class("dim-label");
+    row.append(&why);
+    row
 }
 
 fn section_title(text: &str) -> Label {

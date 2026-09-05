@@ -54,6 +54,7 @@ fn main() -> ExitCode {
         Some("progress") => command_progress(),
         Some("games") => command_games(),
         Some("doctor") => command_doctor(),
+        Some("today") => command_today(),
         Some("export") => command_export(args.get(1).map(PathBuf::from)),
         Some("restore") => command_restore(args.get(1).map(PathBuf::from)),
         Some("import-pgn") => command_import_pgn(args.get(1).map(PathBuf::from), args.get(2)),
@@ -85,6 +86,7 @@ USAGE:
     omachess status          Report what is stored
     omachess progress        Show the time-to-solve trend per rating band
     omachess games           Show how well you have been playing the engine
+    omachess today           What to train now, and the measurement behind it
     omachess doctor          Faults recorded, and the raw data behind training
     omachess export <FILE>   Write your history to a file you can keep
     omachess restore <FILE>  Merge a history file back in
@@ -330,6 +332,25 @@ fn command_games() -> anyhow::Result<()> {
 
 /// Everything the application has collected about itself and about the
 /// solver, in one place: faults first, then the raw skill data.
+/// What to do today, and why.
+fn command_today() -> anyhow::Result<()> {
+    let store = open_store()?;
+    let plan = omachess_core::plan::todays_plan(&store)?;
+    let total: u32 = plan.iter().map(|s| s.minutes).sum();
+    println!("Today — about {total} minutes\n");
+    for (index, step) in plan.iter().enumerate() {
+        println!(
+            "  {}. {}  ({} min)",
+            index + 1,
+            step.headline(),
+            step.minutes
+        );
+        println!("     {}", step.why);
+        println!();
+    }
+    Ok(())
+}
+
 fn command_doctor() -> anyhow::Result<()> {
     use omachess_core::diagnostics::{self, Fault};
 

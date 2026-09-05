@@ -266,6 +266,7 @@ impl Trainer {
             endgames: p::endgame_records(&store).unwrap_or_default(),
             openings: p::opening_records(&store).unwrap_or_default(),
             pressure: p::pressure_record(&store).unwrap_or_default(),
+            plan: omachess_core::plan::todays_plan(&store).unwrap_or_default(),
             repeat_mode: store.repeat_mode().unwrap_or(false),
         }
     }
