@@ -375,6 +375,26 @@ fn command_doctor() -> anyhow::Result<()> {
         }
     }
 
+    // Everything outside the puzzle trainer: games, study, endgames.
+    let activities = store.activities()?;
+    if activities.is_empty() {
+        println!("  nothing logged outside the trainer yet");
+    } else {
+        for (activity, count) in &activities {
+            let median = store
+                .activity_summary(activity)?
+                .map(|(_, ms)| format!("{:.1}s median", ms as f64 / 1000.0))
+                .unwrap_or_default();
+            let what = match activity.as_str() {
+                "play" => "moves against the engine",
+                "study" => "positions looked at",
+                "endgame" => "moves converting endgames",
+                other => other,
+            };
+            println!("  {count:5} {what:28} {median}");
+        }
+    }
+
     let by_position = store.by_position_in_session()?;
     if by_position.is_empty() {
         println!("  no sittings recorded yet");
@@ -669,8 +689,9 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         sounds.clone(),
         engine.clone(),
     );
-    let endgames = endgame_view::EndgameView::new(store, pieces.clone(), sounds, engine.clone());
-    let study = study_view::StudyView::new(pieces, engine);
+    let endgames =
+        endgame_view::EndgameView::new(store.clone(), pieces.clone(), sounds, engine.clone());
+    let study = study_view::StudyView::new(store, pieces, engine);
 
     let progress = progress_view::ProgressView::new();
     progress.refresh(&trainer.progress_data());

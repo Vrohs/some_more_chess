@@ -1255,6 +1255,11 @@ pub struct EndgameRecord {
     pub attempts: u32,
     pub achieved: u32,
     pub last_achieved: Option<bool>,
+    /// Moves taken in the most recent successful conversion, and the fewest
+    /// the position allows. A win in twice the necessary moves is a win, but
+    /// it is not yet technique.
+    pub best_conversion: Option<u32>,
+    pub optimal_moves: Option<u32>,
 }
 
 impl EndgameRecord {
@@ -1288,6 +1293,10 @@ pub fn endgame_records(store: &Store) -> Result<Vec<EndgameRecord>> {
             attempts: mine.len() as u32,
             achieved: mine.iter().filter(|(_, _, ok)| *ok).count() as u32,
             last_achieved: mine.last().map(|(_, _, ok)| *ok),
+            best_conversion: store.endgame_conversions(entry.key)?.into_iter().min(),
+            // The tablebase reports distance to mate in plies; a player counts
+            // their own moves, which is half of it.
+            optimal_moves: entry.dtm.map(|dtm| dtm.div_ceil(2)),
         });
     }
     Ok(out)

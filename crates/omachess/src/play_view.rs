@@ -71,6 +71,8 @@ pub struct PlayView {
     /// The opening this game was set up in, and how many plies of it were
     /// played before the player took over. Empty for a game from move one.
     drilling: RefCell<Option<(String, u32)>>,
+    /// The sitting these games belong to, opened on the first one.
+    sitting: Cell<Option<i64>>,
     clock_mine: Label,
     /// For each of the player's own moves, whether it was made on a low clock.
     /// Kept beside the move times so a blunder can be attributed to the clock.
@@ -279,6 +281,7 @@ impl PlayView {
             opening_pick,
             drillable_openings: RefCell::new(Vec::new()),
             drilling: RefCell::new(None),
+            sitting: Cell::new(None),
             clock_mine,
             pressured: RefCell::new(Vec::new()),
             report: RefCell::new(None),
@@ -549,6 +552,16 @@ impl PlayView {
                 Game::from_fen(player, &fen).unwrap_or_else(|| Game::new(player))
             }
         };
+        if self.sitting.get().is_none() {
+            match self
+                .store
+                .borrow()
+                .begin_session("play", chrono::Utc::now())
+            {
+                Ok(id) => self.sitting.set(Some(id)),
+                Err(e) => omachess_core::diagnostics::record_error("play::begin_session", e),
+            }
+        }
         *self.drilling.borrow_mut() = opening
             .as_ref()
             .map(|(name, moves)| (name.clone(), moves.len() as u32));
@@ -725,6 +738,42 @@ impl PlayView {
                 let guard = self.game.borrow();
                 guard.as_ref().map(|game| game.player())
             };
+            // Logged before the clock is charged, so the record says what was
+            // showing while the move was being chosen rather than after.
+            {
+                let (subject, ply, uci) = {
+                    let guard = self.game.borrow();
+                    match guard.as_ref() {
+                        Some(game) => (
+                            game.initial_fen().to_owned(),
+                            game.moves().len().saturating_sub(1) as u32,
+                            game.moves().last().cloned().unwrap_or_default(),
+                        ),
+                        None => (String::new(), 0, String::new()),
+                    }
+                };
+                let detail = match (mover, self.clock.borrow().as_ref()) {
+                    (Some(mover), Some(clock)) => format!(
+                        "{{\"clock_ms\":{},\"pressured\":{}}}",
+                        clock.showing(mover, thinking).as_millis(),
+                        clock.under_pressure(mover, thinking)
+                    ),
+                    _ => "{\"clock_ms\":null,\"pressured\":false}".to_owned(),
+                };
+                if let Err(e) = self.store.borrow().log_move(
+                    self.sitting.get(),
+                    "play",
+                    &subject,
+                    chrono::Utc::now(),
+                    ply,
+                    &uci,
+                    thinking,
+                    &detail,
+                ) {
+                    omachess_core::diagnostics::record_error("play::log_move", e);
+                }
+            }
+
             if let (Some(mover), Some(clock)) = (mover, self.clock.borrow_mut().as_mut()) {
                 self.pressured
                     .borrow_mut()

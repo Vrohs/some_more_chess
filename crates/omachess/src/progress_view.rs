@@ -396,8 +396,17 @@ fn endgame_row(record: &EndgameRecord) -> GtkBox {
     objective.add_css_class("dim-label");
     row.append(&objective);
 
+    // A win in twice the necessary moves is still a win, but it is not yet
+    // technique — and the tablebase makes "necessary" a fact, not an opinion.
+    let efficiency = match (record.best_conversion, record.optimal_moves) {
+        (Some(taken), Some(optimal)) => format!("  best {taken} vs {optimal} needed"),
+        _ => String::new(),
+    };
     let score = Label::builder()
-        .label(format!("{} / {}", record.achieved, record.attempts))
+        .label(format!(
+            "{} / {}{efficiency}",
+            record.achieved, record.attempts
+        ))
         .halign(Align::End)
         .build();
     // The most recent attempt is what the player is actually able to do now,

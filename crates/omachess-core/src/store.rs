@@ -93,6 +93,27 @@ CREATE TABLE IF NOT EXISTS settings (
 -- One attempt at converting a theoretical endgame. Whether a won position was
 -- won is the least arguable measurement in the application, so it is kept
 -- separate from puzzle attempts rather than blended into them.
+-- Every move made anywhere that is not a puzzle solve: a game against the
+-- engine, a position stepped through in study, an endgame being converted.
+--
+-- Puzzles keep their own table because an attempt has a right answer to score
+-- against; these do not, so what is worth keeping is the move, how long it
+-- took, and whatever the activity knows about the moment — the clock, the
+-- direction of travel, the phase.
+CREATE TABLE IF NOT EXISTS move_log (
+    id         INTEGER PRIMARY KEY,
+    session_id INTEGER,
+    activity   TEXT NOT NULL,
+    subject    TEXT NOT NULL,
+    at         TEXT NOT NULL,
+    ply        INTEGER NOT NULL,
+    played     TEXT NOT NULL,
+    think_ms   INTEGER NOT NULL,
+    detail     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS move_log_activity ON move_log (activity, at);
+CREATE INDEX IF NOT EXISTS move_log_subject ON move_log (activity, subject, ply);
+
 -- Where a drill position came from.
 --
 -- A position lifted from a lost game is only training material if the solver
@@ -905,6 +926,65 @@ impl Store {
         )? > 0)
     }
 
+    // -- the move log ----------------------------------------------------
+
+    /// Record one move made outside the puzzle trainer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_move(
+        &self,
+        session_id: Option<i64>,
+        activity: &str,
+        subject: &str,
+        at: DateTime<Utc>,
+        ply: u32,
+        played: &str,
+        think: std::time::Duration,
+        detail: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO move_log
+             (session_id, activity, subject, at, ply, played, think_ms, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                session_id,
+                activity,
+                subject,
+                at,
+                ply,
+                played,
+                think.as_millis() as i64,
+                detail
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// How much has been logged for an activity, and the median think time.
+    ///
+    /// The median rather than the mean: one position left open over lunch
+    /// would otherwise decide the answer.
+    pub fn activity_summary(&self, activity: &str) -> Result<Option<(u32, i64)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT think_ms FROM move_log WHERE activity = ?1 ORDER BY think_ms ASC",
+        )?;
+        let times: Vec<i64> = stmt
+            .query_map(params![activity], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if times.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((times.len() as u32, times[times.len() / 2])))
+    }
+
+    /// Every activity that has been logged, with how many moves each holds.
+    pub fn activities(&self) -> Result<Vec<(String, u32)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT activity, COUNT(*) FROM move_log GROUP BY activity ORDER BY 2 DESC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u32)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     // -- drills ----------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
@@ -1091,6 +1171,18 @@ impl Store {
                 |r| Ok((r.get::<_, i64>(0)? as u32, r.get::<_, i64>(1)? as u32)),
             )
             .map_err(Into::into)
+    }
+
+    /// Moves taken in each successful conversion of an endgame, most recent
+    /// last. How long a win took against how long it needed is the sharpest
+    /// skill measure the application has: the target is not an opinion.
+    pub fn endgame_conversions(&self, key: &str) -> Result<Vec<u32>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT moves FROM endgame_attempts
+             WHERE endgame_key = ?1 AND achieved = 1 ORDER BY attempted_at ASC",
+        )?;
+        let rows = stmt.query_map(params![key], |r| Ok(r.get::<_, i64>(0)? as u32))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Every endgame attempt, oldest first, for the progress readout.

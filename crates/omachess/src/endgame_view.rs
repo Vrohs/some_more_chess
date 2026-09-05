@@ -47,6 +47,10 @@ pub struct EndgameView {
     thinking: Cell<bool>,
     /// Set once the attempt has been judged, so it is recorded exactly once.
     settled: Cell<bool>,
+    /// The sitting these attempts belong to.
+    sitting: Cell<Option<i64>>,
+    /// When the move being considered began.
+    move_started: Cell<Option<std::time::Instant>>,
 }
 
 impl EndgameView {
@@ -144,6 +148,8 @@ impl EndgameView {
             start,
             thinking: Cell::new(false),
             settled: Cell::new(true),
+            sitting: Cell::new(None),
+            move_started: Cell::new(None),
         });
 
         view.describe(0);
@@ -243,6 +249,17 @@ impl EndgameView {
         self.board.set_orientation(Color::White);
         self.board.set_last_move(None);
         self.board.set_mate(None);
+        if self.sitting.get().is_none() {
+            match self
+                .store
+                .borrow()
+                .begin_session("endgame", chrono::Utc::now())
+            {
+                Ok(id) => self.sitting.set(Some(id)),
+                Err(e) => omachess_core::diagnostics::record_error("endgame::begin_session", e),
+            }
+        }
+        self.move_started.set(Some(std::time::Instant::now()));
         *self.game.borrow_mut() = Some(game);
         self.settled.set(false);
         self.thinking.set(false);
@@ -291,6 +308,40 @@ impl EndgameView {
         self.sounds
             .play(if capture { Cue::Capture } else { Cue::Move });
         drop(slot);
+
+        {
+            let thinking = self
+                .move_started
+                .replace(Some(std::time::Instant::now()))
+                .map(|start| start.elapsed())
+                .unwrap_or_default();
+            let (ply, uci, left) = {
+                let guard = self.game.borrow();
+                match guard.as_ref() {
+                    Some(game) => (
+                        game.moves().len().saturating_sub(1) as u32,
+                        game.moves().last().cloned().unwrap_or_default(),
+                        endgame::moves_until_fifty(game.position()),
+                    ),
+                    None => (0, String::new(), 0),
+                }
+            };
+            // The fifty-move budget is the thing under pressure in a conversion,
+            // so how much of it was left is what makes the move readable later.
+            let detail = format!("{{\"moves_until_fifty\":{left}}}");
+            if let Err(e) = self.store.borrow().log_move(
+                self.sitting.get(),
+                "endgame",
+                self.entry().key,
+                chrono::Utc::now(),
+                ply,
+                &uci,
+                thinking,
+                &detail,
+            ) {
+                omachess_core::diagnostics::record_error("endgame::log_move", e);
+            }
+        }
 
         self.update_countdown();
         if self.judge() {

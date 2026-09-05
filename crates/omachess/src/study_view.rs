@@ -35,6 +35,13 @@ const POLL_MS: u32 = 80;
 pub struct StudyView {
     root: GtkBox,
     board: Rc<BoardView>,
+    store: Rc<RefCell<omachess_core::store::Store>>,
+    /// The sitting these positions belong to.
+    sitting: Cell<Option<i64>>,
+    /// When the position now on the board was reached, so time spent looking
+    /// at it can be recorded. Dwell is the whole signal here: a study session
+    /// has no right answers to score, only where the attention went.
+    arrived: Cell<Option<std::time::Instant>>,
     worker: Option<EngineWorker>,
     games: RefCell<Vec<ImportedGame>>,
     walk: RefCell<Option<Walkthrough>>,
@@ -61,7 +68,11 @@ pub struct StudyView {
 }
 
 impl StudyView {
-    pub fn new(pieces: Option<Rc<PieceSet>>, engine: Option<std::path::PathBuf>) -> Rc<Self> {
+    pub fn new(
+        store: Rc<RefCell<omachess_core::store::Store>>,
+        pieces: Option<Rc<PieceSet>>,
+        engine: Option<std::path::PathBuf>,
+    ) -> Rc<Self> {
         let board = BoardView::new(pieces);
         let worker = engine.map(EngineWorker::spawn);
 
@@ -179,6 +190,9 @@ impl StudyView {
         let view = Rc::new(Self {
             root,
             board,
+            store,
+            sitting: Cell::new(None),
+            arrived: Cell::new(None),
             worker,
             games: RefCell::new(Vec::new()),
             walk: RefCell::new(None),
@@ -348,6 +362,19 @@ impl StudyView {
                     game.white, game.black, game.result
                 ));
                 drop(games);
+                if self.sitting.get().is_none() {
+                    match self
+                        .store
+                        .borrow()
+                        .begin_session("study", chrono::Utc::now())
+                    {
+                        Ok(id) => self.sitting.set(Some(id)),
+                        Err(e) => {
+                            omachess_core::diagnostics::record_error("study::begin_session", e)
+                        }
+                    }
+                }
+                self.arrived.set(Some(std::time::Instant::now()));
                 *self.walk.borrow_mut() = Some(walk);
                 self.refresh();
             }
@@ -356,6 +383,7 @@ impl StudyView {
     }
 
     fn step(self: &Rc<Self>, step: Step) {
+        self.log_dwell(step);
         {
             let mut walk = self.walk.borrow_mut();
             let Some(walk) = walk.as_mut() else {
@@ -375,6 +403,59 @@ impl StudyView {
             };
         }
         self.refresh();
+    }
+
+    /// Record how long the position being left was looked at.
+    ///
+    /// There is nothing to score in study — no right answer, no clock — so
+    /// attention is the measurement: which positions were sat with, and which
+    /// were stepped straight past.
+    fn log_dwell(&self, step: Step) {
+        let Some(arrived) = self.arrived.replace(Some(std::time::Instant::now())) else {
+            return;
+        };
+        let Some(sitting) = self.sitting.get() else {
+            return;
+        };
+        let (subject, ply, played) = {
+            let walk = self.walk.borrow();
+            match walk.as_ref() {
+                Some(walk) => (
+                    walk.played_san().join(" "),
+                    walk.index() as u32,
+                    walk.moves_so_far().last().cloned().unwrap_or_default(),
+                ),
+                None => return,
+            }
+        };
+        // The subject is the game; a whole move list would make the log
+        // unreadable, so it is identified by its opening moves.
+        let subject: String = subject
+            .split_whitespace()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let detail = format!(
+            "{{\"direction\":\"{}\"}}",
+            match step {
+                Step::Forward => "forward",
+                Step::Back => "back",
+                Step::Start => "start",
+                Step::End => "end",
+            }
+        );
+        if let Err(e) = self.store.borrow().log_move(
+            Some(sitting),
+            "study",
+            &subject,
+            chrono::Utc::now(),
+            ply,
+            &played,
+            arrived.elapsed(),
+            &detail,
+        ) {
+            omachess_core::diagnostics::record_error("study::log_dwell", e);
+        }
     }
 
     /// Redraw everything for the position now being looked at, and ask the

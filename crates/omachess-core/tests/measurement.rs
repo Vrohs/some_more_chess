@@ -999,3 +999,126 @@ fn a_sitting_is_only_called_tired_once_the_drop_is_real() {
         "a steady sitting is left alone"
     );
 }
+
+/// Play, study and endgames each leave a record. They have no right answer to
+/// score against, so what is kept is the move, how long it took, and what the
+/// activity knew about the moment.
+#[test]
+fn every_activity_leaves_a_record() {
+    let store = Store::in_memory().unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap();
+    let sitting = store.begin_session("play", at).unwrap();
+
+    let log = |activity: &str, subject: &str, ply: u32, played: &str, ms: u64, detail: &str| {
+        store
+            .log_move(
+                Some(sitting),
+                activity,
+                subject,
+                at + Duration::seconds(ply as i64),
+                ply,
+                played,
+                std::time::Duration::from_millis(ms),
+                detail,
+            )
+            .unwrap();
+    };
+
+    log(
+        "play",
+        "startpos",
+        0,
+        "e2e4",
+        3_000,
+        r#"{"clock_ms":597000,"pressured":false}"#,
+    );
+    log(
+        "play",
+        "startpos",
+        2,
+        "g1f3",
+        9_000,
+        r#"{"clock_ms":588000,"pressured":false}"#,
+    );
+    log(
+        "play",
+        "startpos",
+        4,
+        "f1c4",
+        1_000,
+        r#"{"clock_ms":40000,"pressured":true}"#,
+    );
+    log(
+        "study",
+        "1. e4 c5",
+        6,
+        "d2d4",
+        20_000,
+        r#"{"direction":"forward"}"#,
+    );
+    log(
+        "endgame",
+        "lucena",
+        0,
+        "d4e4",
+        5_000,
+        r#"{"moves_until_fifty":49}"#,
+    );
+
+    let activities = store.activities().unwrap();
+    assert_eq!(activities.len(), 3, "three activities recorded");
+    assert_eq!(
+        activities.iter().find(|(a, _)| a == "play").unwrap().1,
+        3,
+        "every move against the engine is kept"
+    );
+
+    // The median, not the mean: one position left open over lunch must not
+    // decide what a typical move looks like.
+    let (count, median) = store.activity_summary("play").unwrap().unwrap();
+    assert_eq!(count, 3);
+    assert_eq!(median, 3_000, "the middle of 1s, 3s and 9s");
+
+    assert!(store.activity_summary("nothing-here").unwrap().is_none());
+}
+
+/// Converting a won endgame in twice the necessary moves is a win but not
+/// technique, and the tablebase makes "necessary" a fact rather than a view.
+#[test]
+fn endgame_conversions_are_measured_against_the_tablebase() {
+    use omachess_core::endgame::find;
+    use omachess_core::progress::endgame_records;
+
+    let store = Store::in_memory().unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap();
+
+    // Two wins and a failure, the better win second.
+    store.record_endgame("lucena", at, true, 44).unwrap();
+    store
+        .record_endgame("lucena", at + Duration::days(1), false, 60)
+        .unwrap();
+    store
+        .record_endgame("lucena", at + Duration::days(2), true, 29)
+        .unwrap();
+
+    let records = endgame_records(&store).unwrap();
+    let lucena = records
+        .iter()
+        .find(|r| r.key == "lucena")
+        .expect("recorded");
+    assert_eq!(lucena.attempts, 3);
+    assert_eq!(lucena.achieved, 2);
+    assert_eq!(
+        lucena.best_conversion,
+        Some(29),
+        "the fewest moves taken in a win"
+    );
+
+    // Distance to mate is in plies; a player counts their own moves.
+    let dtm = find("lucena").unwrap().dtm.unwrap();
+    assert_eq!(lucena.optimal_moves, Some(dtm.div_ceil(2)));
+    assert!(
+        lucena.best_conversion.unwrap() > lucena.optimal_moves.unwrap(),
+        "a real conversion is slower than perfect play, which is the point"
+    );
+}
