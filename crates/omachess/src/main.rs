@@ -56,6 +56,10 @@ fn main() -> ExitCode {
         Some("games") => command_games(),
         Some("doctor") => command_doctor(),
         Some("today") => command_today(),
+        Some("--version" | "-V" | "version") => {
+            println!("{}", describe_build());
+            Ok(())
+        }
         Some("export") => command_export(args.get(1).map(PathBuf::from)),
         Some("restore") => command_restore(args.get(1).map(PathBuf::from)),
         Some("import-pgn") => command_import_pgn(args.get(1).map(PathBuf::from), args.get(2)),
@@ -88,6 +92,7 @@ USAGE:
     omachess progress        Show the time-to-solve trend per rating band
     omachess games           Show how well you have been playing the engine
     omachess today           What to train now, and the measurement behind it
+    omachess --version       Which build is running, and from where
     omachess doctor          Faults recorded, and the raw data behind training
     omachess export <FILE>   Write your history to a file you can keep
     omachess restore <FILE>  Merge a history file back in
@@ -352,8 +357,33 @@ fn command_today() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Which build is actually running, and from where.
+///
+/// A stale copy on `PATH` shadowing the real one is invisible from inside the
+/// application and produces a version of events where nothing works as
+/// described and nobody can say why. One command should settle it.
+fn describe_build() -> String {
+    let path = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_owned());
+    let built = std::env::current_exe()
+        .and_then(|p| p.metadata())
+        .and_then(|m| m.modified())
+        .map(|t| {
+            let stamp: chrono::DateTime<chrono::Local> = t.into();
+            stamp.format("%Y-%m-%d %H:%M").to_string()
+        })
+        .unwrap_or_else(|_| "unknown".to_owned());
+    format!(
+        "omachess {}\n  running: {path}\n  built:   {built}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 fn command_doctor() -> anyhow::Result<()> {
     use omachess_core::diagnostics::{self, Fault};
+
+    println!("{}\n", describe_build());
 
     let path = diagnostics::default_path();
     let faults = diagnostics::read(&path);

@@ -77,6 +77,18 @@ way that has nothing to do with getting better — and solve time is the number
 this application exists to measure. The answer is revealed after two wrong
 moves, by which point the attempt already counts as failed.
 
+## Running the build you just made
+
+The desktop entry runs `omachess` from `PATH`. If a *copy* is sitting there it
+will go stale the moment you rebuild, and the application will behave nothing
+like the source in front of you — this has happened, and it cost a day of
+confusion. Link it instead:
+
+    ./scripts/install-local.sh
+
+`omachess --version` reports which binary is running and when it was built, so
+the question is answerable rather than mysterious.
+
 ## Development
 
 The toolchain is pinned with `mise`; nothing is installed system-wide.
