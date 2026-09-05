@@ -75,6 +75,14 @@ pub struct GameRow {
     pub opening: String,
     #[serde(default)]
     pub book_plies: u32,
+    /// How the game was timed and how it went on a low clock, absent in older
+    /// backups.
+    #[serde(default)]
+    pub time_control: String,
+    #[serde(default)]
+    pub pressure_moves: u32,
+    #[serde(default)]
+    pub pressure_blunders: u32,
 }
 
 /// What a restore actually changed.
@@ -102,6 +110,9 @@ pub fn export(store: &Store) -> Result<String> {
                 player: g.player,
                 opening: g.opening,
                 book_plies: g.book_plies,
+                time_control: g.time_control,
+                pressure_moves: g.pressure_moves,
+                pressure_blunders: g.pressure_blunders,
                 played_at: g.played_at,
                 player_white: g.player_white,
                 opponent_elo: g.opponent_elo,
@@ -176,6 +187,9 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
             },
             opening: game.opening.clone(),
             book_plies: game.book_plies,
+            time_control: game.time_control.clone(),
+            pressure_moves: game.pressure_moves,
+            pressure_blunders: game.pressure_blunders,
             played_at: game.played_at,
             player_white: game.player_white,
             opponent_elo: game.opponent_elo,
@@ -236,6 +250,9 @@ mod tests {
         store.set_repeat_mode(true).unwrap();
         store
             .record_game(&GameRecord {
+                time_control: String::new(),
+                pressure_moves: 0,
+                pressure_blunders: 0,
                 opening: String::new(),
                 book_plies: 0,
                 player: String::new(),

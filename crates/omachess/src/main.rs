@@ -450,6 +450,12 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
         let counts = analysis.counts();
         store.record_game(&GameRecord {
             player: player.clone(),
+            // A PGN export carries clock times, but not in a form this reads
+            // yet, so an imported game claims no time-pressure record rather
+            // than a false one.
+            time_control: String::new(),
+            pressure_moves: 0,
+            pressure_blunders: 0,
             opening: opening.as_ref().map(|o| o.name.clone()).unwrap_or_default(),
             book_plies: opening.as_ref().map(|o| o.plies as u32).unwrap_or(0),
             played_at: parse_date(game.date.as_deref()).unwrap_or_else(chrono::Utc::now),

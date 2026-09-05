@@ -413,6 +413,9 @@ mod game_tests {
             player: String::new(),
             opening: String::new(),
             book_plies: 0,
+            time_control: String::new(),
+            pressure_moves: 0,
+            pressure_blunders: 0,
         }
     }
 
@@ -1051,6 +1054,71 @@ pub const WEAKNESS_MARGIN: f64 = 0.10;
 
 /// Themes the solver handles worse than they handle puzzles generally, worst
 /// first, together with the baseline they are being judged against.
+/// Blunder rate on a low clock against blunder rate with time in hand.
+pub struct PressureRecord {
+    /// The player's moves made with a low clock, and blunders among them.
+    pub pressure_moves: u32,
+    pub pressure_blunders: u32,
+    /// All other analysed moves in the same games, and blunders among them.
+    pub calm_moves: u32,
+    pub calm_blunders: u32,
+    pub games: u32,
+}
+
+impl PressureRecord {
+    pub fn pressure_rate(&self) -> f64 {
+        rate(self.pressure_blunders, self.pressure_moves)
+    }
+    pub fn calm_rate(&self) -> f64 {
+        rate(self.calm_blunders, self.calm_moves)
+    }
+    /// How many times more often a blunder appears on a low clock. `None` when
+    /// there is nothing to divide by.
+    pub fn multiplier(&self) -> Option<f64> {
+        let calm = self.calm_rate();
+        (calm > 0.0 && self.pressure_moves > 0).then(|| self.pressure_rate() / calm)
+    }
+}
+
+fn rate(part: u32, whole: u32) -> f64 {
+    if whole == 0 {
+        return 0.0;
+    }
+    f64::from(part) / f64::from(whole)
+}
+
+/// The fewest low-clock moves before the comparison says anything.
+pub const MIN_PRESSURE_MOVES: u32 = 20;
+
+/// Whether blunders cluster on a low clock, across timed games only.
+///
+/// Imported games record no time control, so they are left out rather than
+/// counted as calm — treating an unknown clock as a comfortable one would
+/// quietly flatten the very effect this looks for.
+pub fn pressure_record(store: &Store) -> Result<Option<PressureRecord>> {
+    let mut record = PressureRecord {
+        pressure_moves: 0,
+        pressure_blunders: 0,
+        calm_moves: 0,
+        calm_blunders: 0,
+        games: 0,
+    };
+    for game in store.games_mine()? {
+        if game.time_control.is_empty() {
+            continue;
+        }
+        record.games += 1;
+        record.pressure_moves += game.pressure_moves;
+        record.pressure_blunders += game.pressure_blunders;
+        record.calm_moves += game.moves.saturating_sub(game.pressure_moves);
+        record.calm_blunders += game.blunders.saturating_sub(game.pressure_blunders);
+    }
+    if record.pressure_moves < MIN_PRESSURE_MOVES {
+        return Ok(None);
+    }
+    Ok(Some(record))
+}
+
 /// How one opening has gone: how often it was reached, how it scored, and how
 /// far into a named line the player was still following theory.
 pub struct OpeningRecord {

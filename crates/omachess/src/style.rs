@@ -97,6 +97,15 @@ const DEFAULT_CSS: &str = r#"
 .omachess-coord.on-light { color: #6b4423; }
 .omachess-coord.on-dark  { color: #e9cfa6; }
 .omachess-status { font-size: 15px; }
+/* The clock is read at a glance under pressure, so it is large, monospaced so
+   the digits do not shift as they count, and turns red once the move is being
+   made on a low clock. */
+.omachess-clock {
+    font-size: 20px;
+    font-family: monospace;
+    font-feature-settings: "tnum";
+}
+.omachess-clock.error { color: @error_color; font-weight: bold; }
 /* The sparkline reads its stroke colour from CSS, so the chart stays on the
    Omarchy palette even though the board no longer does. */
 .omachess-spark { color: @accent_color; }

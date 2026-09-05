@@ -60,6 +60,14 @@ pub struct PlayView {
     /// Think time for each of the player's own moves.
     move_times: RefCell<Vec<std::time::Duration>>,
     turn_started: Cell<Option<Instant>>,
+    /// The clock, absent when the game is untimed.
+    clock: RefCell<Option<omachess_core::clock::Clock>>,
+    /// Which time control the picker is on.
+    control: DropDown,
+    clock_mine: Label,
+    /// For each of the player's own moves, whether it was made on a low clock.
+    /// Kept beside the move times so a blunder can be attributed to the clock.
+    pressured: RefCell<Vec<bool>>,
     /// The finished game's analysis, awaiting the player's decision.
     report: RefCell<Option<GameAnalysis>>,
     /// Result headline, shown only once the game is actually over.
@@ -104,6 +112,21 @@ impl PlayView {
         moves.add_css_class("monospace");
 
         let side = DropDown::from_strings(&["Play White", "Play Black"]);
+
+        // An untimed game trains a skill nobody uses in a rated game, so a time
+        // control is offered first and "Untimed" has to be chosen deliberately.
+        let mut control_labels: Vec<&str> = omachess_core::clock::PRESETS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        control_labels.push("Untimed");
+        let control = DropDown::from_strings(&control_labels);
+
+        // Only the player is on a clock. The engine moves in a fixed few
+        // hundred milliseconds and is not the one being trained, so a second
+        // clock would be decoration standing in for a real opponent.
+        let clock_mine = Label::builder().halign(Align::Start).build();
+        clock_mine.add_css_class("omachess-clock");
         let start = Button::with_label("New game");
         start.add_css_class("suggested-action");
 
@@ -143,6 +166,7 @@ impl PlayView {
             .spacing(8)
             .build();
         controls.append(&side);
+        controls.append(&control);
         controls.append(&start);
         controls.append(&resign);
 
@@ -184,6 +208,7 @@ impl PlayView {
             .width_request(240)
             .build();
         panel.append(&controls);
+        panel.append(&clock_mine);
         panel.append(&banner);
         panel.append(&status);
         panel.append(&detail);
@@ -237,6 +262,10 @@ impl PlayView {
             review_scroll,
             move_times: RefCell::new(Vec::new()),
             turn_started: Cell::new(None),
+            clock: RefCell::new(None),
+            control,
+            clock_mine,
+            pressured: RefCell::new(Vec::new()),
             report: RefCell::new(None),
             banner,
             drill: RefCell::new(None),
@@ -293,6 +322,7 @@ impl PlayView {
             move || match weak.upgrade() {
                 Some(view) => {
                     view.drain_engine();
+                    view.tick_clock();
                     glib::ControlFlow::Continue
                 }
                 None => glib::ControlFlow::Break,
@@ -333,6 +363,95 @@ impl PlayView {
 
     /// The strength to cap the opponent at: a little above the player, and
     /// never below what the engine is willing to do.
+    /// The time control the picker is on, or `None` for an untimed game.
+    fn chosen_control(&self) -> Option<omachess_core::clock::TimeControl> {
+        control_at(self.control.selected() as usize)
+    }
+
+    /// Paint the clock, including the time being spent on the move in progress.
+    fn show_clocks(&self) {
+        let guard = self.clock.borrow();
+        let Some(clock) = guard.as_ref() else {
+            self.clock_mine.set_label("");
+            self.clock_mine.set_visible(false);
+            return;
+        };
+        self.clock_mine.set_visible(true);
+
+        let mine = self
+            .game
+            .borrow()
+            .as_ref()
+            .map(|game| game.player())
+            .unwrap_or(Color::White);
+        // Only count the current think while it is actually the player's turn.
+        let thinking = match self.turn_started.get() {
+            Some(started) => started.elapsed(),
+            None => std::time::Duration::ZERO,
+        };
+        let left = clock.showing(mine, thinking);
+        self.clock_mine
+            .set_label(&format!("Your clock  {}", format_clock(left)));
+
+        let low = left < clock.control().pressure_threshold();
+        if low {
+            self.clock_mine.add_css_class("error");
+        } else {
+            self.clock_mine.remove_css_class("error");
+        }
+    }
+
+    /// Keep the clock moving, and end the game the moment it runs out rather
+    /// than waiting for a move that is never going to come.
+    fn tick_clock(&self) {
+        let Some(started) = self.turn_started.get() else {
+            return;
+        };
+        let mine = {
+            let guard = self.game.borrow();
+            match guard.as_ref() {
+                Some(game) if game.outcome().is_none() => game.player(),
+                _ => return,
+            }
+        };
+        let expired = match self.clock.borrow_mut().as_mut() {
+            Some(clock) => clock.expire(mine, started.elapsed()),
+            None => return,
+        };
+        if expired {
+            self.flag(mine);
+        } else {
+            self.show_clocks();
+        }
+    }
+
+    /// End the game because a clock ran out.
+    fn flag(&self, ran_out: Color) {
+        use omachess_core::clock::{flag_outcome, Flag};
+        let outcome = {
+            let guard = self.game.borrow();
+            let Some(game) = guard.as_ref() else {
+                return;
+            };
+            flag_outcome(game.position(), ran_out)
+        };
+        // Resigning is the only way the game type can end without a move, and
+        // losing on time is the same shape of result.
+        if let Some(game) = self.game.borrow_mut().as_mut() {
+            game.resign();
+        }
+        self.turn_started.set(None);
+        self.show_clocks();
+        self.banner.set_visible(true);
+        self.banner.set_label(match outcome {
+            Flag::Lost(_) => "Lost on time.",
+            Flag::DrawnByInsufficientMaterial(_) => {
+                "Out of time — drawn, the engine cannot mate with what it has left."
+            }
+        });
+        self.finish_game();
+    }
+
     fn opponent_elo(&self) -> u32 {
         let rating = self
             .store
@@ -367,7 +486,10 @@ impl PlayView {
         self.opening.set_label("");
         *self.game.borrow_mut() = Some(game);
         self.move_times.borrow_mut().clear();
+        self.pressured.borrow_mut().clear();
+        *self.clock.borrow_mut() = self.chosen_control().map(omachess_core::clock::Clock::new);
         self.turn_started.set(Some(Instant::now()));
+        self.show_clocks();
         self.resign.set_visible(true);
         self.review_scroll.set_visible(false);
         clear_list(&self.review_list);
@@ -511,8 +633,25 @@ impl PlayView {
             }
         }
         if let Some(started) = self.turn_started.take() {
-            self.move_times.borrow_mut().push(started.elapsed());
+            let thinking = started.elapsed();
+            self.move_times.borrow_mut().push(thinking);
+            // Recorded before the clock is charged: what matters is how much
+            // time was showing while the move was being chosen.
+            let mover = {
+                let guard = self.game.borrow();
+                guard.as_ref().map(|game| game.player())
+            };
+            if let (Some(mover), Some(clock)) = (mover, self.clock.borrow_mut().as_mut()) {
+                self.pressured
+                    .borrow_mut()
+                    .push(clock.under_pressure(mover, thinking));
+                if !clock.commit(mover, thinking) {
+                    self.flag(mover);
+                    return;
+                }
+            }
         }
+        self.show_clocks();
         self.after_move(Some((mv.from(), mv.to())));
         self.sounds.play(self.cue_for(mv));
         self.request_engine_if_due();
@@ -908,7 +1047,29 @@ impl PlayView {
             return;
         };
         let counts = analysis.counts();
+        // Which of the player's blunders were played on a low clock. The
+        // analysis indexes the player's own moves in the order they were made,
+        // which is the same order the pressure flags were recorded in.
+        let pressured = self.pressured.borrow();
+        let pressure_moves = pressured.iter().filter(|low| **low).count() as u32;
+        let pressure_blunders = analysis
+            .moves
+            .iter()
+            .enumerate()
+            .filter(|(index, review)| {
+                review.severity == Some(omachess_core::review::Severity::Blunder)
+                    && pressured.get(*index).copied().unwrap_or(false)
+            })
+            .count() as u32;
+        let time_control = self
+            .chosen_control()
+            .map(|control| control.label())
+            .unwrap_or_default();
+
         let record = omachess_core::store::GameRecord {
+            time_control,
+            pressure_moves,
+            pressure_blunders,
             opening: opening_name,
             book_plies,
             // Played here, so it is this machine's user regardless of the name
@@ -1132,6 +1293,25 @@ fn trace(message: &str) {
     }
 }
 
+/// The control at a position in the picker. The list is the presets followed
+/// by "Untimed", so the last entry deliberately has no control behind it.
+fn control_at(index: usize) -> Option<omachess_core::clock::TimeControl> {
+    omachess_core::clock::PRESETS
+        .get(index)
+        .map(|(_, control)| *control)
+}
+
+/// Minutes and seconds, and tenths once it is nearly gone — which is when a
+/// tenth is the difference between moving and flagging.
+fn format_clock(left: std::time::Duration) -> String {
+    let secs = left.as_secs();
+    if secs >= 20 {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    } else {
+        format!("{:.1}", left.as_secs_f64())
+    }
+}
+
 fn clear_list(list: &ListBox) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
@@ -1166,4 +1346,34 @@ fn format_moves(game: &Game, times: &[std::time::Duration]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omachess_core::clock::PRESETS;
+
+    /// The picker holds the presets plus "Untimed" at the end, so the last
+    /// index must fall through to no clock rather than off the end of the list
+    /// or onto the wrong control.
+    #[test]
+    fn the_last_entry_in_the_picker_is_untimed() {
+        for (index, (_, expected)) in PRESETS.iter().enumerate() {
+            assert_eq!(control_at(index), Some(*expected), "preset {index}");
+        }
+        assert_eq!(control_at(PRESETS.len()), None, "Untimed has no clock");
+        assert_eq!(control_at(PRESETS.len() + 100), None);
+    }
+
+    /// Under twenty seconds the display switches to tenths, because that is
+    /// when a tenth is the difference between moving and flagging.
+    #[test]
+    fn the_clock_shows_tenths_only_when_it_is_nearly_gone() {
+        use std::time::Duration;
+        assert_eq!(format_clock(Duration::from_secs(600)), "10:00");
+        assert_eq!(format_clock(Duration::from_secs(65)), "1:05");
+        assert_eq!(format_clock(Duration::from_secs(20)), "0:20");
+        assert_eq!(format_clock(Duration::from_millis(19_400)), "19.4");
+        assert_eq!(format_clock(Duration::ZERO), "0.0");
+    }
 }

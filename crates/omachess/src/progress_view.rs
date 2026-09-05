@@ -7,9 +7,9 @@
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Label, Orientation};
 use omachess_core::progress::{
-    EndgameRecord, GamePoint, Improvement, OpeningRecord, PlayTrend, SlopePoint, Transfer,
-    Weakness, MIN_GAMES, MIN_OPENING_GAMES, MIN_RATING_POINTS, MIN_THEME_ATTEMPTS, MIN_TRANSFER,
-    SIGNIFICANT,
+    EndgameRecord, GamePoint, Improvement, OpeningRecord, PlayTrend, PressureRecord, SlopePoint,
+    Transfer, Weakness, MIN_GAMES, MIN_OPENING_GAMES, MIN_PRESSURE_MOVES, MIN_RATING_POINTS,
+    MIN_THEME_ATTEMPTS, MIN_TRANSFER, SIGNIFICANT,
 };
 use omachess_core::store::MIN_REPEAT_HOURS;
 
@@ -29,6 +29,7 @@ pub struct ProgressData {
     pub play: Option<PlayTrend>,
     pub endgames: Vec<EndgameRecord>,
     pub openings: Vec<OpeningRecord>,
+    pub pressure: Option<PressureRecord>,
     pub repeat_mode: bool,
 }
 
@@ -131,6 +132,45 @@ impl ProgressView {
             self.root.append(&section_title("By rating band"));
             for (band, improvement) in &data.bands {
                 self.root.append(&band_row(*band, improvement));
+            }
+        }
+
+        self.root.append(&section_title("Blunders on a low clock"));
+        match &data.pressure {
+            None => self.root.append(&caption(&format!(
+                "Needs {MIN_PRESSURE_MOVES} moves played with a low clock. Only games played here \
+                 to a time control count — an imported game carries no clock, and counting it as \
+                 comfortable play would flatten the very effect this looks for.",
+            ))),
+            Some(record) => {
+                self.root.append(&caption(&format!(
+                    "Across {} timed game{}: {:.1}% of your moves on a low clock were blunders, \
+                     against {:.1}% with time in hand.",
+                    record.games,
+                    if record.games == 1 { "" } else { "s" },
+                    record.pressure_rate() * 100.0,
+                    record.calm_rate() * 100.0,
+                )));
+                if let Some(multiplier) = record.multiplier() {
+                    let verdict = Label::builder()
+                        .label(if multiplier >= 1.5 {
+                            format!(
+                                "{multiplier:.1}x more often when the clock is low. This is where \
+                                 your games are decided — practise moving before it gets here."
+                            )
+                        } else if multiplier <= 0.75 {
+                            format!("{multiplier:.1}x — a low clock is not what costs you.")
+                        } else {
+                            "About the same either way; the clock is not the cause.".to_owned()
+                        })
+                        .halign(Align::Start)
+                        .wrap(true)
+                        .build();
+                    if multiplier >= 1.5 {
+                        verdict.add_css_class("error");
+                    }
+                    self.root.append(&verdict);
+                }
             }
         }
 

@@ -176,6 +176,12 @@ pub struct GameRecord {
     pub opening: String,
     /// How many plies followed that named line.
     pub book_plies: u32,
+    /// The time control played, empty for an untimed game.
+    pub time_control: String,
+    /// The player's own moves made with a low clock, and how many of those
+    /// were blunders. Zero when the game was untimed.
+    pub pressure_moves: u32,
+    pub pressure_blunders: u32,
     /// Mean win probability given away per move in each phase, and how many
     /// moves were played in it. A loss of -1 means the game predates the
     /// breakdown being recorded.
@@ -251,7 +257,7 @@ impl Store {
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as u32;
 
         // Steps are appended here and never renumbered or edited once shipped.
-        let steps: [&str; 4] = [
+        let steps: [&str; 5] = [
             // Imported games need an identity of their own so a re-import does
             // not duplicate them; games played in the app leave it empty.
             "ALTER TABLE games ADD COLUMN source TEXT NOT NULL DEFAULT ''",
@@ -275,6 +281,12 @@ impl Store {
             // what you play, which is half of preparing for anything.
             "ALTER TABLE games ADD COLUMN opening TEXT NOT NULL DEFAULT '';
              ALTER TABLE games ADD COLUMN book_plies INTEGER NOT NULL DEFAULT 0",
+            // How the game was timed, and how many of the player's moves were
+            // made on a low clock. Whether blunders cluster there is the one
+            // thing the move-time record could never answer on its own.
+            "ALTER TABLE games ADD COLUMN time_control TEXT NOT NULL DEFAULT '';
+             ALTER TABLE games ADD COLUMN pressure_moves INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE games ADD COLUMN pressure_blunders INTEGER NOT NULL DEFAULT 0",
         ];
 
         for (index, sql) in steps.iter().enumerate() {
@@ -725,9 +737,9 @@ impl Store {
              (played_at, player_white, opponent_elo, result, moves, accuracy,
               mean_loss, blunders, mistakes, inaccuracies, source,
               opening_loss, middlegame_loss, endgame_loss,
-              opening_moves, middlegame_moves, endgame_moves, player, opening, book_plies)
+              opening_moves, middlegame_moves, endgame_moves, player, opening, book_plies, time_control, pressure_moves, pressure_blunders)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                     ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                     ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 game.played_at,
                 game.player_white as i64,
@@ -749,6 +761,9 @@ impl Store {
                 game.player,
                 game.opening,
                 game.book_plies,
+                game.time_control,
+                game.pressure_moves,
+                game.pressure_blunders,
             ],
         )?;
         Ok(())
@@ -835,7 +850,8 @@ impl Store {
                     mean_loss, blunders, mistakes, inaccuracies, source,
                     opening_loss, middlegame_loss, endgame_loss,
                     opening_moves, middlegame_moves, endgame_moves, player,
-                    opening, book_plies";
+                    opening, book_plies, time_control, pressure_moves,
+                    pressure_blunders";
         let read = |r: &rusqlite::Row<'_>| {
             Ok(GameRecord {
                 played_at: r.get(0)?,
@@ -866,6 +882,9 @@ impl Store {
                 player: r.get(17)?,
                 opening: r.get(18)?,
                 book_plies: r.get(19)?,
+                time_control: r.get(20)?,
+                pressure_moves: r.get(21)?,
+                pressure_blunders: r.get(22)?,
             })
         };
         let rows = match player {

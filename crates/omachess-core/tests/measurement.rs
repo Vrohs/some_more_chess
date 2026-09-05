@@ -387,6 +387,9 @@ fn another_players_import_is_never_counted_as_your_play() {
         player: owner.into(),
         opening: String::new(),
         book_plies: 0,
+        time_control: String::new(),
+        pressure_moves: 0,
+        pressure_blunders: 0,
     };
 
     let store = Store::in_memory().unwrap();
@@ -431,6 +434,9 @@ fn the_duplicate_check_is_scoped_to_the_player() {
             player: "someone_else".into(),
             opening: String::new(),
             book_plies: 0,
+            time_control: String::new(),
+            pressure_moves: 0,
+            pressure_blunders: 0,
         })
         .unwrap();
 
@@ -569,6 +575,9 @@ fn openings_are_reported_worst_first_and_only_once_there_is_a_sample() {
         player: "vrohs".into(),
         opening: opening.into(),
         book_plies: 6,
+        time_control: String::new(),
+        pressure_moves: 0,
+        pressure_blunders: 0,
     };
 
     let store = Store::in_memory().unwrap();
@@ -607,4 +616,73 @@ fn openings_are_reported_worst_first_and_only_once_there_is_a_sample() {
     assert_eq!(records[0].score(), 0.25);
     assert_eq!(records[1].score(), 0.875);
     assert_eq!(records[0].mean_book_plies, 6.0);
+}
+
+/// Whether blunders cluster on a low clock is the point of having a clock at
+/// all, and imported games — which carry no time control — must not be folded
+/// in as calm play, which would flatten the effect being looked for.
+#[test]
+fn time_pressure_is_measured_only_where_there_was_a_clock() {
+    use omachess_core::progress::{pressure_record, MIN_PRESSURE_MOVES};
+    use omachess_core::store::{GameRecord, PhaseLoss};
+
+    let game =
+        |control: &str, moves: u32, blunders: u32, p_moves: u32, p_blunders: u32, day: i64| {
+            GameRecord {
+                played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap()
+                    + Duration::days(day),
+                player_white: true,
+                opponent_elo: 1320,
+                result: "lost".into(),
+                moves,
+                accuracy: 80.0,
+                mean_loss: 0.05,
+                blunders,
+                mistakes: 0,
+                inaccuracies: 0,
+                source: String::new(),
+                phases: [PhaseLoss::UNKNOWN; 3],
+                player: "vrohs".into(),
+                opening: String::new(),
+                book_plies: 0,
+                time_control: control.into(),
+                pressure_moves: p_moves,
+                pressure_blunders: p_blunders,
+            }
+        };
+
+    let store = Store::in_memory().unwrap();
+    store.set_setting("player_name", "vrohs").unwrap();
+
+    // Not enough low-clock moves yet: nothing may be claimed.
+    store.record_game(&game("10+0", 40, 2, 5, 1, 0)).unwrap();
+    assert!(pressure_record(&store).unwrap().is_none());
+
+    // Two more timed games take it over the threshold. Across the three:
+    // 45 pressured moves with 9 blunders, 75 calm moves with 3.
+    store.record_game(&game("10+0", 40, 5, 20, 4, 1)).unwrap();
+    store.record_game(&game("10+0", 40, 5, 20, 4, 2)).unwrap();
+
+    // An imported game with no clock must be ignored entirely, not counted as
+    // 200 calm moves that would wash the effect out.
+    let mut imported = game("", 200, 0, 0, 0, 3);
+    imported.source = "https://lichess.org/x".into();
+    store.record_game(&imported).unwrap();
+
+    let record = pressure_record(&store)
+        .unwrap()
+        .expect("enough low-clock moves");
+    assert_eq!(record.games, 3, "only the timed games count");
+    assert_eq!(record.pressure_moves, 45);
+    assert_eq!(record.pressure_blunders, 9);
+    assert_eq!(record.calm_moves, 75);
+    assert_eq!(record.calm_blunders, 3);
+    assert!(record.pressure_moves >= MIN_PRESSURE_MOVES);
+
+    // 20% on a low clock against 4% with time in hand: five times as often.
+    let multiplier = record.multiplier().expect("a calm rate to divide by");
+    assert!(
+        (multiplier - 5.0).abs() < 1e-9,
+        "expected 5x, got {multiplier}"
+    );
 }
