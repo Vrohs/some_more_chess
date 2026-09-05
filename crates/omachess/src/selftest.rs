@@ -759,9 +759,14 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         play.begin_game();
         play.board().drag(Square::E2, Square::E4);
         play.give_up();
+        // Said once, and in the tab's own status line rather than a block that
+        // sat on the screen until the next game.
         expect(
-            !play.banner_text().is_empty(),
-            "a finished game said nothing about how it ended",
+            play.status_text().to_lowercase().contains("resign"),
+            &format!(
+                "a finished game did not say how it ended: {:?}",
+                play.status_text()
+            ),
         )?;
         // The list of flagged moves only appears when there is something to
         // flag, and a two-ply game has nothing. What always has to arrive is

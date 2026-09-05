@@ -60,10 +60,6 @@ const DEFAULT_CSS: &str = r#"
         rgba(214, 45, 40, 0.35) 100%);
     box-shadow: inset 0 0 0 4px rgba(255, 90, 80, 0.95);
 }
-.omachess-banner {
-    font-size: 22px;
-    font-weight: bold;
-}
 .omachess-square.in-check {
     background-image: radial-gradient(circle closest-side at center,
         rgba(214, 45, 40, 0.90) 0%,

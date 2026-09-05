@@ -19,7 +19,7 @@ use gtk4::{
 use omachess_core::drill::{Drill, Offer};
 use omachess_core::engine::MIN_LIMITED_ELO;
 use omachess_core::game::{material_balance, whose_turn, Turn};
-use omachess_core::game::{EndReason, Game, Verdict};
+use omachess_core::game::{Game, Verdict};
 use omachess_core::openings;
 use omachess_core::puzzle::Puzzle;
 use omachess_core::review::{
@@ -79,8 +79,6 @@ pub struct PlayView {
     pressured: RefCell<Vec<bool>>,
     /// The finished game's analysis, awaiting the player's decision.
     report: RefCell<Option<GameAnalysis>>,
-    /// Result headline, shown only once the game is actually over.
-    banner: Label,
     /// The position where the game turned, offered back as practice.
     drill: RefCell<Option<Drill>>,
     drill_button: Button,
@@ -153,15 +151,6 @@ impl PlayView {
 
         let resign = Button::with_label("Resign");
         resign.set_visible(false);
-
-        // A finished game must never look like one still in progress.
-        let banner = Label::builder()
-            .halign(Align::Start)
-            .wrap(true)
-            .max_width_chars(30)
-            .visible(false)
-            .build();
-        banner.add_css_class("omachess-banner");
 
         let material = Label::builder().halign(Align::Start).build();
         material.add_css_class("dim-label");
@@ -236,7 +225,6 @@ impl PlayView {
             .build();
         panel.append(&controls);
         panel.append(&clock_mine);
-        panel.append(&banner);
         panel.append(&status);
         panel.append(&detail);
         panel.append(&material);
@@ -299,7 +287,6 @@ impl PlayView {
             clock_mine,
             pressured: RefCell::new(Vec::new()),
             report: RefCell::new(None),
-            banner,
             drill: RefCell::new(None),
             drill_button,
             add_button,
@@ -416,8 +403,8 @@ impl PlayView {
         self.detail.text().to_string()
     }
 
-    pub(crate) fn banner_text(&self) -> String {
-        self.banner.text().to_string()
+    pub(crate) fn status_text(&self) -> String {
+        self.status.text().to_string()
     }
 
     /// Choose a time control by its place in the picker, as clicking it does.
@@ -586,14 +573,13 @@ impl PlayView {
         }
         self.turn_started.set(None);
         self.show_clocks();
-        self.banner.set_visible(true);
         let said = match outcome {
             Flag::Lost(_) => "Lost on time.",
             Flag::DrawnByInsufficientMaterial(_) => {
                 "Out of time — drawn, the engine cannot mate with what it has left."
             }
         };
-        self.banner.set_label(said);
+        self.status.set_label(said);
         crate::announce::say(
             match outcome {
                 Flag::Lost(_) => crate::announce::Tone::Lost,
@@ -674,7 +660,6 @@ impl PlayView {
         self.moves.set_label("");
         *self.report.borrow_mut() = None;
         self.add_button.set_visible(false);
-        self.banner.set_visible(false);
         self.board.set_mate(None);
         *self.drill.borrow_mut() = None;
         self.drill_button.set_visible(false);
@@ -1114,7 +1099,6 @@ impl PlayView {
             Some(reason) => format!("{} — {outcome}", reason.label()),
             None => outcome.to_owned(),
         };
-        self.banner.set_label(&said);
         crate::announce::say(
             match verdict {
                 Some(Verdict::Won) => crate::announce::Tone::Won,
@@ -1124,21 +1108,10 @@ impl PlayView {
             },
             &said,
         );
-        self.banner.remove_css_class("improving");
-        self.banner.remove_css_class("slowing");
-        self.banner.add_css_class(match verdict {
-            Some(Verdict::Won) => "improving",
-            _ => "slowing",
-        });
-        self.banner.set_visible(true);
-        self.status.set_label(match reason {
-            Some(EndReason::Checkmate) => "The game is over.",
-            Some(EndReason::Resigned) => "You resigned.",
-            Some(EndReason::Stalemate | EndReason::InsufficientMaterial) => {
-                "Neither side can win from here."
-            }
-            None => "The game is over.",
-        });
+        // Said once, in the tab's own status line. It used to be said here and
+        // again in a 22px block underneath, and neither went away until a new
+        // game started.
+        self.status.set_label(&said);
 
         let Some(worker) = &self.worker else {
             return;
@@ -1237,7 +1210,6 @@ impl PlayView {
         self.board.set_mate(None);
         self.board.set_last_move(None);
         self.board.select(None);
-        self.banner.set_visible(false);
 
         self.status.set_label("Find the move.");
         self.detail.set_label(&format!(

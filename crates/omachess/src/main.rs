@@ -61,7 +61,8 @@ fn main() -> ExitCode {
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
+    let command = args.first().map(String::as_str);
+    let result = match command {
         Some("ingest") => command_ingest(args.get(1).map(PathBuf::from)),
         Some("status") => command_status(),
         Some("progress") => command_progress(),
@@ -87,7 +88,15 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            omachess_core::diagnostics::record_error("command", &e);
+            // A self-test that finds something broken is the tool doing its
+            // job, not the application faulting. Recording it fills the fault
+            // log with the results of running diagnostics, which is the one
+            // thing that log must never be full of: it is read to find out
+            // what went wrong, and every false entry makes the real ones
+            // harder to see.
+            if command != Some("selftest") {
+                omachess_core::diagnostics::record_error("command", &e);
+            }
             eprintln!("omachess: {e:#}");
             ExitCode::FAILURE
         }

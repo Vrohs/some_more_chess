@@ -8,8 +8,14 @@
 //!
 //! This is one mechanism for all of them: a line of text across the window,
 //! stating the outcome in words. It never takes input, so it cannot swallow the
-//! next click, and a rejection clears itself while a result stays until the
-//! next position replaces it.
+//! next click, and everything it says clears itself.
+//!
+//! Results used to stay up until the next game started. They were also being
+//! restated in the panel underneath, so the same sentence sat on the screen
+//! twice, in two sizes, for as long as you cared to look at the final
+//! position — which is exactly when you want to look at the board and not at
+//! a caption about it. What happened is a moment; the tab's own status line is
+//! where the state belongs.
 
 use std::cell::RefCell;
 use std::time::Duration;
@@ -44,16 +50,24 @@ impl Tone {
         }
     }
 
-    /// Whether the message clears itself. A refused move is a moment; a result
-    /// is a state, and it stays until the next position replaces it.
-    fn is_transient(self) -> bool {
-        self == Tone::Rejected
+    /// How long this stays up. Everything goes away on its own; a result is
+    /// simply given longer, because it is a whole sentence rather than a nudge
+    /// and it usually arrives with a position worth reading underneath it.
+    fn dwell(self) -> Duration {
+        match self {
+            Tone::Rejected => Duration::from_millis(REJECTED_MS),
+            _ => Duration::from_millis(RESULT_MS),
+        }
     }
 }
 
 /// How long a refused move stays on screen. Long enough to read six words,
 /// short enough not to sit over the position while you look for the real move.
-const TRANSIENT_MS: u64 = 1_800;
+const REJECTED_MS: u64 = 1_800;
+
+/// How long a result stays. Long enough to read a sentence and glance at the
+/// board, short enough that it is gone before you want the board back.
+const RESULT_MS: u64 = 4_500;
 
 struct Banner {
     label: Label,
@@ -112,19 +126,14 @@ pub fn say(tone: Tone, text: &str) {
         banner.label.set_visible(true);
         banner.last = Some((tone, text.to_owned()));
 
-        if tone.is_transient() {
-            banner.hide = Some(glib::timeout_add_local_once(
-                Duration::from_millis(TRANSIENT_MS),
-                || {
-                    BANNER.with(|cell| {
-                        if let Some(banner) = cell.borrow_mut().as_mut() {
-                            banner.label.set_visible(false);
-                            banner.hide = None;
-                        }
-                    });
-                },
-            ));
-        }
+        banner.hide = Some(glib::timeout_add_local_once(tone.dwell(), || {
+            BANNER.with(|cell| {
+                if let Some(banner) = cell.borrow_mut().as_mut() {
+                    banner.label.set_visible(false);
+                    banner.hide = None;
+                }
+            });
+        }));
     });
 }
 
@@ -160,14 +169,27 @@ pub fn last() -> Option<(Tone, String)> {
 mod tests {
     use super::*;
 
-    /// A refused move is a moment and clears itself; a result is a state and
-    /// stays until the next position replaces it.
+    /// Nothing stays on the screen. A result used to sit there until the next
+    /// game started, on top of the panel saying the same thing, which is a
+    /// caption nobody asked for over the position they wanted to look at.
     #[test]
-    fn only_a_rejection_clears_itself() {
-        assert!(Tone::Rejected.is_transient());
-        for tone in [Tone::Won, Tone::Lost, Tone::Drawn, Tone::Ended] {
-            assert!(!tone.is_transient(), "{tone:?} should stay up");
+    fn everything_clears_itself() {
+        for tone in [
+            Tone::Rejected,
+            Tone::Won,
+            Tone::Lost,
+            Tone::Drawn,
+            Tone::Ended,
+        ] {
+            assert!(
+                tone.dwell() > Duration::ZERO,
+                "{tone:?} would never go away"
+            );
         }
+        assert!(
+            Tone::Rejected.dwell() < Tone::Lost.dwell(),
+            "a nudge should not sit there as long as a sentence"
+        );
     }
 
     /// Each tone needs its own class, or they cannot be told apart and the
