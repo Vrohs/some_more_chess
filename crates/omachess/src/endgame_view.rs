@@ -372,10 +372,13 @@ impl EndgameView {
         let entry = self.entry();
         let outcome = entry.judge(winner);
         let achieved = outcome == Outcome::Achieved;
-        let _ = self
-            .store
-            .borrow()
-            .record_endgame(entry.key, chrono::Utc::now(), achieved, moves);
+        if let Err(e) =
+            self.store
+                .borrow()
+                .record_endgame(entry.key, chrono::Utc::now(), achieved, moves)
+        {
+            omachess_core::diagnostics::record_error("endgame::record_endgame", e);
+        }
 
         self.status
             .set_label(&match (entry.objective, winner, achieved) {

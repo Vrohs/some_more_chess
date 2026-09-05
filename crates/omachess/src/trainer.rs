@@ -300,12 +300,16 @@ impl Trainer {
 
     /// Draw only from positions taken out of the player's own games.
     pub fn set_own_mistakes_mode(&self, on: bool) {
-        let _ = self.store.borrow().set_own_mistakes_mode(on);
+        if let Err(e) = self.store.borrow().set_own_mistakes_mode(on) {
+            omachess_core::diagnostics::record_error("trainer::set_own_mistakes_mode", e);
+        }
     }
 
     /// Switch between learning new material and re-testing solved material.
     pub fn set_repeat_mode(&self, on: bool) {
-        let _ = self.store.borrow().set_repeat_mode(on);
+        if let Err(e) = self.store.borrow().set_repeat_mode(on) {
+            omachess_core::diagnostics::record_error("trainer::set_repeat_mode", e);
+        }
         self.load_next();
     }
 

@@ -14,7 +14,7 @@ const SELECTION_WINDOW: u32 = 25;
 const SELECTION_PROBES: u32 = 8;
 use crate::puzzle::Puzzle;
 
-const SCHEMA: &str = r#"
+pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS puzzles (
     id               TEXT PRIMARY KEY,
     fen              TEXT NOT NULL,
@@ -172,16 +172,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     ended_at   TEXT,
     kind       TEXT NOT NULL
 );
-
--- Anything else worth recording, kept loosely so a new measurement does not
--- need a migration before it can start collecting.
-CREATE TABLE IF NOT EXISTS events (
-    id     INTEGER PRIMARY KEY,
-    at     TEXT NOT NULL,
-    kind   TEXT NOT NULL,
-    detail TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS events_kind ON events (kind, at);
 
 CREATE TABLE IF NOT EXISTS endgame_attempts (
     id           INTEGER PRIMARY KEY,
@@ -426,13 +416,6 @@ impl Store {
                 .pragma_update(None, "user_version", i64::from(target))?;
         }
         Ok(())
-    }
-
-    /// The schema version this database is at.
-    pub fn schema_version(&self) -> Result<u32> {
-        Ok(self
-            .conn
-            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as u32)
     }
 
     // -- puzzles ---------------------------------------------------------
@@ -718,22 +701,6 @@ impl Store {
     }
 
     /// Every correct attempt in a band, oldest first — the fluency series.
-    pub fn latency_series(&self, rating_band: u32) -> Result<Vec<(DateTime<Utc>, Duration)>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT reviewed_at, elapsed_ms FROM attempts
-             WHERE band = ?1 AND correct = 1
-             ORDER BY reviewed_at ASC",
-        )?;
-        let rows = stmt.query_map(params![rating_band], |r| {
-            Ok((r.get::<_, DateTime<Utc>>(0)?, r.get::<_, i64>(1)?))
-        })?;
-        Ok(rows
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|(at, ms)| (at, Duration::milliseconds(ms)))
-            .collect())
-    }
-
     /// Fraction of all attempts solved. A motif is judged against this rather
     /// than an absolute bar: the useful question is not "are you good at forks"
     /// but "are forks worse for you than everything else you do".
@@ -1206,23 +1173,6 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Record anything worth keeping that has no table of its own.
-    pub fn record_event(&self, at: DateTime<Utc>, kind: &str, detail: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO events (at, kind, detail) VALUES (?1, ?2, ?3)",
-            params![at, kind, detail],
-        )?;
-        Ok(())
-    }
-
-    pub fn events(&self, kind: &str, limit: u32) -> Result<Vec<(DateTime<Utc>, String)>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT at, detail FROM events WHERE kind = ?1 ORDER BY at DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![kind, limit], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
     // -- endgames --------------------------------------------------------
 
     pub fn record_endgame(
@@ -1354,6 +1304,79 @@ impl Store {
     }
 
     // -- backup ----------------------------------------------------------
+
+    /// Every endgame attempt with its move count, for a backup.
+    pub fn export_endgames(&self) -> Result<Vec<crate::backup::EndgameRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT endgame_key, attempted_at, achieved, moves
+             FROM endgame_attempts ORDER BY attempted_at ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::backup::EndgameRow {
+                key: r.get(0)?,
+                attempted_at: r.get(1)?,
+                achieved: r.get::<_, i64>(2)? != 0,
+                moves: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn export_drill_positions(&self) -> Result<Vec<crate::backup::DrillRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT puzzle_id, source, played_at, ply, played, best, lost, phase, win_before
+             FROM drill_positions ORDER BY puzzle_id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::backup::DrillRow {
+                puzzle_id: r.get(0)?,
+                source: r.get(1)?,
+                played_at: r.get(2)?,
+                ply: r.get(3)?,
+                played: r.get(4)?,
+                best: r.get(5)?,
+                lost: r.get(6)?,
+                phase: r.get(7)?,
+                win_before: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn export_drill_attempts(&self) -> Result<Vec<crate::backup::DrillAttemptRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT puzzle_id, attempted_at, achieved, moves, result
+             FROM drill_attempts ORDER BY attempted_at ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::backup::DrillAttemptRow {
+                puzzle_id: r.get(0)?,
+                attempted_at: r.get(1)?,
+                achieved: r.get::<_, i64>(2)? != 0,
+                moves: r.get(3)?,
+                result: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Whether an endgame attempt at this instant is already stored, so a
+    /// restore can merge instead of duplicating.
+    pub fn has_endgame_attempt(&self, at: DateTime<Utc>) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM endgame_attempts WHERE attempted_at = ?1",
+            params![at],
+            |r| r.get::<_, i64>(0),
+        )? > 0)
+    }
+
+    pub fn has_drill_attempt(&self, at: DateTime<Utc>) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM drill_attempts WHERE attempted_at = ?1",
+            params![at],
+            |r| r.get::<_, i64>(0),
+        )? > 0)
+    }
 
     pub fn export_attempts(&self) -> Result<Vec<crate::backup::AttemptRow>> {
         let mut stmt = self.conn.prepare_cached(

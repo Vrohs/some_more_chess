@@ -23,7 +23,7 @@ use omachess_core::game::{EndReason, Game, Verdict};
 use omachess_core::openings;
 use omachess_core::puzzle::Puzzle;
 use omachess_core::review::{
-    puzzle_from, stable_puzzle_id, time_pressure, GameAnalysis, MoveAnalysis,
+    describe_move, puzzle_from, stable_puzzle_id, time_pressure, GameAnalysis, MoveAnalysis,
 };
 use omachess_core::store::Store;
 use shakmaty::{Color, Move, Position, Square};
@@ -1227,14 +1227,20 @@ impl PlayView {
         let opponent = f64::from(record.opponent_elo);
         {
             let store = self.store.borrow();
-            let _ = store.record_game(&record);
+            // A game that cannot be filed is a game you played and lost the
+            // record of, so the failure is written down rather than shrugged at.
+            if let Err(e) = store.record_game(&record) {
+                omachess_core::diagnostics::record_error("play::record_game", e);
+            }
             // Playing strength follows results against the engine, not puzzles.
             if let Ok(current) = store.play_rating() {
-                let _ = store.set_play_rating(omachess_core::game::next_play_rating(
+                if let Err(e) = store.set_play_rating(omachess_core::game::next_play_rating(
                     current,
                     opponent,
                     &record.result,
-                ));
+                )) {
+                    omachess_core::diagnostics::record_error("play::set_play_rating", e);
+                }
             }
         }
     }
@@ -1338,7 +1344,31 @@ impl PlayView {
                     .set_label(&format!("Added {count} of your own positions to training."));
                 self.add_button.set_visible(false);
             }
-            Err(e) => self.detail.set_label(&format!("Could not save: {e}")),
+            Err(e) => {
+                self.detail.set_label(&format!("Could not save: {e}"));
+                return;
+            }
+        }
+
+        // Without this a position from a game played here is a puzzle with no
+        // history: the drill cannot say what was played or what it was worth,
+        // which is the entire difference between a drill and a puzzle.
+        let now = chrono::Utc::now();
+        let store = self.store.borrow();
+        for review in &reviews {
+            if let Err(e) = store.record_drill_origin(
+                &stable_puzzle_id(review),
+                "",
+                now,
+                review.ply as u32,
+                &describe_move(review, &review.played),
+                &describe_move(review, &review.best),
+                review.lost(),
+                review.phase.theme(),
+                review.win_before,
+            ) {
+                omachess_core::diagnostics::record_error("play::record_drill_origin", e);
+            }
         }
     }
 }

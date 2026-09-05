@@ -1,8 +1,14 @@
 //! Exporting and restoring the record of what you have done.
 //!
 //! Puzzles can be downloaded again and the binary can be rebuilt, but the
-//! attempt history cannot be recreated by anything. It is the only irreplaceable
-//! thing in the system and it lives in a single file, so it needs a way out.
+//! record of what you have done cannot be recreated by anything. It is the only
+//! irreplaceable thing in the system and it lives in a single file, so it needs
+//! a way out.
+//!
+//! What counts as irreplaceable has grown, and this file did not grow with it —
+//! for a while a backup silently held four tables out of thirteen. The test at
+//! the bottom now fails when a new table is added without a decision being made
+//! about it, so the promise cannot quietly rot again.
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -21,6 +27,44 @@ pub struct Backup {
     pub cards: Vec<CardRow>,
     pub games: Vec<GameRow>,
     pub settings: Vec<(String, String)>,
+    /// Everything below arrived after the first format and is absent from
+    /// older backups, which load with these empty rather than failing.
+    #[serde(default)]
+    pub endgames: Vec<EndgameRow>,
+    #[serde(default)]
+    pub drill_positions: Vec<DrillRow>,
+    #[serde(default)]
+    pub drill_attempts: Vec<DrillAttemptRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EndgameRow {
+    pub key: String,
+    pub attempted_at: DateTime<Utc>,
+    pub achieved: bool,
+    pub moves: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DrillRow {
+    pub puzzle_id: String,
+    pub source: String,
+    pub played_at: DateTime<Utc>,
+    pub ply: u32,
+    pub played: String,
+    pub best: String,
+    pub lost: f64,
+    pub phase: String,
+    pub win_before: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DrillAttemptRow {
+    pub puzzle_id: String,
+    pub attempted_at: DateTime<Utc>,
+    pub achieved: bool,
+    pub moves: u32,
+    pub result: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -94,6 +138,10 @@ pub struct RestoreReport {
     pub games_added: usize,
     pub games_skipped: usize,
     pub settings_written: usize,
+    pub endgames_written: usize,
+    pub endgames_skipped: usize,
+    pub drills_written: usize,
+    pub drills_skipped: usize,
 }
 
 /// Everything worth keeping, as JSON.
@@ -132,6 +180,9 @@ pub fn export(store: &Store) -> Result<String> {
             })
             .collect(),
         settings: store.export_settings()?,
+        endgames: store.export_endgames()?,
+        drill_positions: store.export_drill_positions()?,
+        drill_attempts: store.export_drill_attempts()?,
     };
     serde_json::to_string_pretty(&backup).context("serialising the backup")
 }
@@ -176,6 +227,50 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
     }
 
     let restoring_as = store.setting("player_name")?.unwrap_or_default();
+    for endgame in &backup.endgames {
+        if store.has_endgame_attempt(endgame.attempted_at)? {
+            report.endgames_skipped += 1;
+            continue;
+        }
+        store.record_endgame(
+            &endgame.key,
+            endgame.attempted_at,
+            endgame.achieved,
+            endgame.moves,
+        )?;
+        report.endgames_written += 1;
+    }
+
+    for drill in &backup.drill_positions {
+        store.record_drill_origin(
+            &drill.puzzle_id,
+            &drill.source,
+            drill.played_at,
+            drill.ply,
+            &drill.played,
+            &drill.best,
+            drill.lost,
+            &drill.phase,
+            drill.win_before,
+        )?;
+        report.drills_written += 1;
+    }
+
+    for attempt in &backup.drill_attempts {
+        if store.has_drill_attempt(attempt.attempted_at)? {
+            report.drills_skipped += 1;
+            continue;
+        }
+        store.record_drill_attempt(
+            &attempt.puzzle_id,
+            attempt.attempted_at,
+            attempt.achieved,
+            attempt.moves,
+            &attempt.result,
+        )?;
+        report.drills_written += 1;
+    }
+
     for game in &backup.games {
         if store.has_game(game.played_at)? {
             report.games_skipped += 1;
@@ -369,5 +464,59 @@ mod tests {
             restore(&mut target, &json).unwrap(),
             RestoreReport::default()
         );
+    }
+
+    /// A backup silently held four tables out of thirteen for several
+    /// releases, because nothing forced a decision when a table was added.
+    ///
+    /// This fails on the next new table until someone either exports it or
+    /// writes down why it does not need exporting.
+    #[test]
+    fn every_table_is_either_backed_up_or_deliberately_not() {
+        // Tables holding nothing irreplaceable, each with its reason.
+        const NOT_BACKED_UP: &[(&str, &str)] = &[
+            ("puzzles", "the corpus is a download, not your history"),
+            ("puzzle_themes", "belongs to the corpus"),
+            (
+                "attempt_moves",
+                "raw detail behind attempts; bulky, and the attempts themselves are carried",
+            ),
+            (
+                "move_log",
+                "raw detail behind games and study; same reasoning",
+            ),
+            (
+                "sessions",
+                "groups raw rows that are themselves not carried",
+            ),
+        ];
+        const BACKED_UP: &[&str] = &[
+            "attempts",
+            "cards",
+            "games",
+            "settings",
+            "endgame_attempts",
+            "drill_positions",
+            "drill_attempts",
+        ];
+
+        let mut tables: Vec<&str> = crate::store::SCHEMA
+            .split("CREATE TABLE IF NOT EXISTS ")
+            .skip(1)
+            .filter_map(|rest| rest.split_whitespace().next())
+            .collect();
+        tables.sort_unstable();
+        tables.dedup();
+        assert!(tables.len() > 5, "the schema should have been parsed");
+
+        for table in tables {
+            let known =
+                BACKED_UP.contains(&table) || NOT_BACKED_UP.iter().any(|(name, _)| *name == table);
+            assert!(
+                known,
+                "table `{table}` is neither backed up nor listed as deliberately \
+                 excluded — decide which, and say why"
+            );
+        }
     }
 }
