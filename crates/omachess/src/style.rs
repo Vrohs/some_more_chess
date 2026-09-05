@@ -87,8 +87,20 @@ const DEFAULT_CSS: &str = r#"
     color: #121212;
     text-shadow: 0 1px 2px rgba(255, 255, 255, 0.55), 0 0 1px rgba(255, 255, 255, 0.7);
 }
-.omachess-board.wrong .omachess-square.light { background-color: #d98d80; }
-.omachess-board.wrong .omachess-square.dark  { background-color: #b35244; }
+/* The board no longer answers a refused move by turning red: it said nothing
+   about what was wrong, and it was the only feedback of its kind. Every board
+   outcome now arrives as text across the window instead. */
+.omachess-announce {
+    font-size: 30px;
+    font-weight: bold;
+    padding: 18px 24px;
+    margin: 0;
+}
+.omachess-announce.rejected { background-color: @error_color;   color: #fff; }
+.omachess-announce.lost     { background-color: @error_color;   color: #fff; }
+.omachess-announce.won      { background-color: @success_color; color: #fff; }
+.omachess-announce.drawn    { background-color: @warning_color; color: #000; }
+.omachess-announce.ended    { background-color: @accent_color;  color: #fff; }
 .omachess-coord {
     font-size: 10px;
     font-weight: bold;

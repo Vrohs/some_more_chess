@@ -546,15 +546,6 @@ impl BoardView {
             self.squares[square as usize].cell.add_css_class("in-check");
         }
     }
-
-    /// Flash the board to show a rejected move.
-    pub fn set_wrong(&self, wrong: bool) {
-        if wrong {
-            self.grid.add_css_class("wrong");
-        } else {
-            self.grid.remove_css_class("wrong");
-        }
-    }
 }
 
 fn coordinate_label(text: &str, halign: Align, valign: Align, on_light: bool) -> Label {

@@ -402,6 +402,7 @@ impl DrillView {
                 Err(e) => omachess_core::diagnostics::record_error("drill::begin_session", e),
             }
         }
+        crate::announce::clear();
         self.move_started.set(Some(std::time::Instant::now()));
         *self.game.borrow_mut() = Some(game);
         self.settled.set(false);
@@ -502,15 +503,20 @@ impl DrillView {
             )
         });
         let Some(mv) = find_move(game.position(), from, to, prefer.as_deref()) else {
-            self.board.set_wrong(true);
+            crate::announce::say(
+                crate::announce::Tone::Rejected,
+                &format!("{from} to {to} is not a legal move here"),
+            );
             return;
         };
         let capture = game.position().board().occupied().contains(to);
         if game.play(&mv).is_err() {
-            self.board.set_wrong(true);
+            crate::announce::say(
+                crate::announce::Tone::Rejected,
+                &format!("{from} to {to} cannot be played in this position"),
+            );
             return;
         }
-        self.board.set_wrong(false);
         self.board.set_position(game.position());
         self.board.set_last_move(Some((from, to)));
         self.sounds
@@ -599,12 +605,21 @@ impl DrillView {
             omachess_core::diagnostics::record_error("drill::record_attempt", e);
         }
 
-        self.status.set_label(match (objective, achieved) {
+        let verdict = match (objective, achieved) {
             (Objective::Win, true) => "Won it this time.",
             (Objective::Win, false) => "The win got away again. That is the position to work on.",
             (Objective::Draw, true) => "Saved.",
             (Objective::Draw, false) => "Lost it again from here.",
-        });
+        };
+        self.status.set_label(verdict);
+        crate::announce::say(
+            if achieved {
+                crate::announce::Tone::Won
+            } else {
+                crate::announce::Tone::Lost
+            },
+            verdict,
+        );
         // Only now: what was played the first time, and what the engine wanted.
         // Withholding it until the position has been fought through is the
         // whole point of walking in blind.

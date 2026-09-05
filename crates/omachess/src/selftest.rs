@@ -62,6 +62,12 @@ fn seeded_store() -> Result<Store, String> {
 pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>) -> bool {
     let mut checks = Vec::new();
 
+    // The window mounts this over everything; without it every announcement
+    // goes nowhere and the checks below would pass on an application that says
+    // nothing at all.
+    let overlay = gtk4::Overlay::new();
+    crate::announce::install(&overlay);
+
     // --- the trainer: click a piece, click where it goes ------------------
     checks.push(check("a puzzle can be solved by clicking", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
@@ -209,6 +215,93 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>) -> bool {
             },
         ));
     }
+
+    // --- what the board says, now that it no longer flashes red -----------
+    checks.push(check("a refused move says why, across the window", || {
+        use crate::announce::{self, Tone};
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let trainer = Trainer::new(store, pieces.clone(), sounds.clone());
+        trainer.begin_solving();
+        announce::clear();
+
+        // A legal rook move that is not the answer.
+        trainer.board().click(Square::B1);
+        trainer.board().click(Square::B4);
+
+        let said = announce::last().ok_or("nothing was announced for a wrong move")?;
+        expect(
+            said.0 == Tone::Rejected,
+            &format!("a wrong move was announced as {:?}", said.0),
+        )?;
+        expect(!said.1.is_empty(), "the rejection had no words in it")
+    }));
+
+    checks.push(check("a finished drill announces the result", || {
+        use crate::announce::{self, Tone};
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        store
+            .borrow()
+            .record_drill_origin(
+                "selftst1",
+                "https://lichess.org/a",
+                chrono::Utc::now(),
+                40,
+                "Kh8",
+                "Rb8",
+                0.9,
+                "middlegame",
+                0.85,
+            )
+            .map_err(|e| e.to_string())?;
+        let drills = DrillView::new(store, pieces.clone(), sounds.clone(), None);
+        drills.reload();
+        drills.begin();
+        announce::clear();
+
+        // Rb1-b8 is mate, which ends the position.
+        drills.board().click(Square::B1);
+        drills.board().click(Square::B8);
+
+        let said = announce::last().ok_or("a finished drill announced nothing")?;
+        expect(
+            matches!(said.0, Tone::Won | Tone::Lost | Tone::Drawn),
+            &format!("a result was announced as {:?}", said.0),
+        )?;
+        expect(!said.1.is_empty(), "the result had no words in it")
+    }));
+
+    checks.push(check("an illegal move is refused in words", || {
+        use crate::announce::{self, Tone};
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        store
+            .borrow()
+            .record_drill_origin(
+                "selftst1",
+                "https://lichess.org/a",
+                chrono::Utc::now(),
+                40,
+                "Kh8",
+                "Rb8",
+                0.9,
+                "middlegame",
+                0.85,
+            )
+            .map_err(|e| e.to_string())?;
+        let drills = DrillView::new(store, pieces.clone(), sounds.clone(), None);
+        drills.reload();
+        drills.begin();
+        announce::clear();
+
+        // A rook cannot go there.
+        drills.board().click(Square::B1);
+        drills.board().click(Square::C3);
+
+        let said = announce::last().ok_or("an illegal move was refused silently")?;
+        expect(
+            said.0 == Tone::Rejected,
+            &format!("an illegal move was announced as {:?}", said.0),
+        )
+    }));
 
     // --- promotion: the question that was never asked ---------------------
     checks.push(check("a promotion offers a choice", || {

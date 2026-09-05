@@ -275,6 +275,7 @@ impl EndgameView {
                 Err(e) => omachess_core::diagnostics::record_error("endgame::begin_session", e),
             }
         }
+        crate::announce::clear();
         self.move_started.set(Some(std::time::Instant::now()));
         *self.game.borrow_mut() = Some(game);
         self.settled.set(false);
@@ -375,15 +376,20 @@ impl EndgameView {
             )
         });
         let Some(mv) = find_move(game.position(), from, to, prefer.as_deref()) else {
-            self.board.set_wrong(true);
+            crate::announce::say(
+                crate::announce::Tone::Rejected,
+                &format!("{from} to {to} is not a legal move here"),
+            );
             return;
         };
         let capture = game.position().board().occupied().contains(to);
         if game.play(&mv).is_err() {
-            self.board.set_wrong(true);
+            crate::announce::say(
+                crate::announce::Tone::Rejected,
+                &format!("{from} to {to} cannot be played in this position"),
+            );
             return;
         }
-        self.board.set_wrong(false);
         self.board.set_position(game.position());
         self.board.set_last_move(Some((from, to)));
         self.sounds
@@ -461,21 +467,29 @@ impl EndgameView {
             omachess_core::diagnostics::record_error("endgame::record_endgame", e);
         }
 
-        self.status
-            .set_label(&match (entry.objective, winner, achieved) {
-                (Objective::Win, Some(Color::White), _) => "Converted.".to_owned(),
-                (Objective::Win, None, _) => {
-                    "Drawn — the win was there and it got away. Try it again.".to_owned()
-                }
-                (Objective::Win, Some(_), _) => "Lost a won position.".to_owned(),
-                (Objective::Draw, None, _) => "Held.".to_owned(),
-                (Objective::Draw, Some(Color::White), _) => {
-                    "Won a position that was only level.".to_owned()
-                }
-                (Objective::Draw, Some(_), _) => {
-                    "Lost a position that was a draw. That is the one to study.".to_owned()
-                }
-            });
+        let verdict = match (entry.objective, winner, achieved) {
+            (Objective::Win, Some(Color::White), _) => "Converted.".to_owned(),
+            (Objective::Win, None, _) => {
+                "Drawn — the win was there and it got away. Try it again.".to_owned()
+            }
+            (Objective::Win, Some(_), _) => "Lost a won position.".to_owned(),
+            (Objective::Draw, None, _) => "Held.".to_owned(),
+            (Objective::Draw, Some(Color::White), _) => {
+                "Won a position that was only level.".to_owned()
+            }
+            (Objective::Draw, Some(_), _) => {
+                "Lost a position that was a draw. That is the one to study.".to_owned()
+            }
+        };
+        self.status.set_label(&verdict);
+        crate::announce::say(
+            if achieved {
+                crate::announce::Tone::Won
+            } else {
+                crate::announce::Tone::Lost
+            },
+            &verdict,
+        );
         self.countdown.set_label("");
         self.show_record();
         true

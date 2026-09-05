@@ -21,7 +21,6 @@ use crate::progress_view::ProgressData;
 use crate::sound::{Cue, Sounds};
 
 /// How long a rejected move stays highlighted.
-const WRONG_FLASH_MS: u32 = 600;
 /// Wrong moves before the answer is shown. The attempt already counts as failed
 /// by then, so there is nothing left to protect.
 const REVEAL_AFTER_MISSES: u32 = 2;
@@ -338,6 +337,7 @@ impl Trainer {
         // revealed is cleared before it appears.
         self.origin.set_label("");
         self.origin.remove_css_class("warning");
+        crate::announce::clear();
         let next = {
             let store = self.store.borrow();
             self.session.next_puzzle(&store, Utc::now())
@@ -350,7 +350,6 @@ impl Trainer {
                     self.board.set_orientation(attempt.position().turn());
                     self.board.clear();
                     self.board.select(None);
-                    self.board.set_wrong(false);
                     self.board.set_last_move(None);
                     self.board.set_check(None);
                     let side = match attempt.position().turn() {
@@ -755,26 +754,18 @@ impl Trainer {
                 None => return,
             }
         };
-        self.board.set_wrong(true);
-
         // The attempt is already recorded as failed, so withholding the answer
         // past this point teaches nothing.
-        if misses >= REVEAL_AFTER_MISSES {
+        let said = if misses >= REVEAL_AFTER_MISSES {
             match self.expected_san() {
-                Some(san) => self
-                    .status
-                    .set_label(&format!("The move is {san} \u{2014} play it to continue")),
-                None => self.status.set_label("Not the move"),
+                Some(san) => format!("Not the move. It is {san} \u{2014} play it to continue"),
+                None => "Not the move".to_owned(),
             }
         } else {
-            self.status.set_label("Not the move \u{2014} try again");
-        }
-
-        let board = self.board.clone();
-        glib::timeout_add_local_once(
-            std::time::Duration::from_millis(u64::from(WRONG_FLASH_MS)),
-            move || board.set_wrong(false),
-        );
+            "Not the move \u{2014} try again".to_owned()
+        };
+        self.status.set_label(&said);
+        crate::announce::say(crate::announce::Tone::Rejected, &said);
     }
 
     fn finish(self: &Rc<Self>) {

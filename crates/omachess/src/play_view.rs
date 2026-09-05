@@ -521,12 +521,20 @@ impl PlayView {
         self.turn_started.set(None);
         self.show_clocks();
         self.banner.set_visible(true);
-        self.banner.set_label(match outcome {
+        let said = match outcome {
             Flag::Lost(_) => "Lost on time.",
             Flag::DrawnByInsufficientMaterial(_) => {
                 "Out of time — drawn, the engine cannot mate with what it has left."
             }
-        });
+        };
+        self.banner.set_label(said);
+        crate::announce::say(
+            match outcome {
+                Flag::Lost(_) => crate::announce::Tone::Lost,
+                Flag::DrawnByInsufficientMaterial(_) => crate::announce::Tone::Drawn,
+            },
+            said,
+        );
         self.finish_game();
     }
 
@@ -611,6 +619,7 @@ impl PlayView {
         *self.clock.borrow_mut() = self.chosen_control().map(omachess_core::clock::Clock::new);
         self.turn_started.set(Some(Instant::now()));
         self.show_clocks();
+        crate::announce::clear();
         self.show_plan();
         self.resign.set_visible(true);
         self.review_scroll.set_visible(false);
@@ -1035,10 +1044,20 @@ impl PlayView {
             Some(Verdict::Drawn) => "Draw",
             None => "Game over",
         };
-        self.banner.set_label(&match reason {
+        let said = match reason {
             Some(reason) => format!("{} — {outcome}", reason.label()),
             None => outcome.to_owned(),
-        });
+        };
+        self.banner.set_label(&said);
+        crate::announce::say(
+            match verdict {
+                Some(Verdict::Won) => crate::announce::Tone::Won,
+                Some(Verdict::Drawn) => crate::announce::Tone::Drawn,
+                Some(Verdict::Lost) => crate::announce::Tone::Lost,
+                None => crate::announce::Tone::Ended,
+            },
+            &said,
+        );
         self.banner.remove_css_class("improving");
         self.banner.remove_css_class("slowing");
         self.banner.add_css_class(match verdict {
@@ -1190,12 +1209,8 @@ impl PlayView {
             }
             Offer::Wrong { revealed: None, .. } => {
                 self.sounds.play(Cue::Wrong);
-                self.board.set_wrong(true);
-                let board = self.board.clone();
-                glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
-                    board.set_wrong(false)
-                });
                 self.status.set_label("Not that one. Look again.");
+                crate::announce::say(crate::announce::Tone::Rejected, "Not that one. Look again.");
             }
             Offer::Wrong {
                 revealed: Some(answer),

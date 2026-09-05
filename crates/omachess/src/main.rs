@@ -1,5 +1,6 @@
 //! OMACHESS — a chess study application for Omarchy.
 
+mod announce;
 mod board;
 mod charts;
 mod drill_view;
@@ -935,12 +936,18 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
     layout.append(&stack);
     stack.set_vexpand(true);
 
+    // The announcement sits over everything, so a result or a refusal reads the
+    // same wherever it came from — and cannot be missed by looking at the wrong
+    // corner of the window.
+    let announced = gtk4::Overlay::builder().child(&layout).build();
+    announce::install(&announced);
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("OMACHESS")
         .default_width(720)
         .default_height(820)
-        .content(&layout)
+        .content(&announced)
         .build();
 
     window.present();
