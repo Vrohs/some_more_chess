@@ -564,6 +564,8 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
     progress.refresh(&trainer.progress_data());
     let progress_page = ScrolledWindow::builder().child(progress.widget()).build();
 
+    play.refresh_openings();
+
     let stack = adw::ViewStack::new();
     stack.add_titled_with_icon(
         trainer.widget(),
@@ -612,8 +614,12 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
             // Dropping any of these leaves live widgets whose handlers all hold
             // only weak references, so the tab silently stops responding.
             let _keep_alive = (&play, &study, &endgames);
-            if stack.visible_child_name().as_deref() == Some("progress") {
-                progress.refresh(&trainer.progress_data());
+            match stack.visible_child_name().as_deref() {
+                Some("progress") => progress.refresh(&trainer.progress_data()),
+                // Which openings are worth drilling depends on games that may
+                // have been played since this view was built.
+                Some("play") => play.refresh_openings(),
+                _ => {}
             }
         });
     }
@@ -649,4 +655,57 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         study.open_path(&path);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every imported game is filed by this date, and the ordering it produces
+    /// is what the whole trend rests on. Sites disagree about the separator,
+    /// and Lichess writes unknown fields as question marks.
+    #[test]
+    fn pgn_dates_are_read_in_the_forms_sites_actually_write() {
+        use chrono::Datelike;
+
+        let parsed = parse_date(Some("2026.09.04")).expect("the PGN standard form");
+        assert_eq!((parsed.year(), parsed.month(), parsed.day()), (2026, 9, 4));
+        // Chess.com and some exporters use dashes or slashes.
+        assert_eq!(
+            parse_date(Some("2026-09-04")),
+            parse_date(Some("2026.09.04"))
+        );
+        assert_eq!(
+            parse_date(Some("2026/09/04")),
+            parse_date(Some("2026.09.04"))
+        );
+    }
+
+    /// An unparseable date must yield nothing rather than a wrong date: the
+    /// caller falls back to the time of import, and a game filed under year
+    /// zero would sit at the head of every trend for ever.
+    #[test]
+    fn an_unreadable_date_is_refused_rather_than_guessed() {
+        assert!(parse_date(None).is_none());
+        assert!(
+            parse_date(Some("????.??.??")).is_none(),
+            "Lichess writes unknowns this way"
+        );
+        assert!(parse_date(Some("2026.09")).is_none(), "no day");
+        assert!(parse_date(Some("")).is_none());
+        assert!(parse_date(Some("not a date")).is_none());
+        // A month that does not exist must not roll over into the next year.
+        assert!(parse_date(Some("2026.13.01")).is_none());
+        assert!(parse_date(Some("2026.02.30")).is_none());
+    }
+
+    /// Dates are stamped at midday rather than midnight so that a game and a
+    /// puzzle solved the same day cannot be separated by a timezone shift.
+    #[test]
+    fn dates_land_at_midday() {
+        use chrono::Timelike;
+        let parsed = parse_date(Some("2026.09.04")).unwrap();
+        assert_eq!(parsed.hour(), 12);
+        assert_eq!(parsed.minute(), 0);
+    }
 }

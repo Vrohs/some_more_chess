@@ -58,6 +58,29 @@ pub fn book_depth(moves: &[String]) -> usize {
     identify(moves).map(|o| o.plies).unwrap_or(0)
 }
 
+/// The moves that reach a named opening, in UCI.
+///
+/// Naming a line the player has already lost in is only half of it; drilling it
+/// needs the position back. Where the book holds several lines under one name,
+/// the shortest is taken: it is the main line, and the continuations are named
+/// separately anyway.
+pub fn moves_for(name: &str) -> Option<Vec<String>> {
+    let mut best: Option<Vec<String>> = None;
+    for (key, (_, candidate)) in book() {
+        if candidate != name {
+            continue;
+        }
+        let moves: Vec<String> = key.split(' ').map(str::to_owned).collect();
+        if best
+            .as_ref()
+            .is_none_or(|shortest| moves.len() < shortest.len())
+        {
+            best = Some(moves);
+        }
+    }
+    best
+}
+
 fn book() -> &'static HashMap<String, (String, String)> {
     static BOOK_INDEX: OnceLock<HashMap<String, (String, String)>> = OnceLock::new();
     BOOK_INDEX.get_or_init(build_index)
@@ -191,5 +214,39 @@ mod tests {
     fn an_empty_game_has_no_name() {
         assert!(identify(&[]).is_none());
         assert_eq!(book_depth(&[]), 0);
+    }
+
+    /// A name has to lead back to the moves that reach it, or a line the player
+    /// keeps losing in cannot be put back on the board.
+    #[test]
+    fn a_named_opening_can_be_played_back() {
+        let moves = moves_for("Caro-Kann Defense").expect("the Caro-Kann is in the book");
+        assert_eq!(moves, vec!["e2e4", "c7c6"]);
+
+        // Round trip: those moves must name the opening they came from.
+        assert_eq!(identify(&moves).unwrap().name, "Caro-Kann Defense");
+    }
+
+    /// A more specific line is longer than the one it continues, and must come
+    /// back in full rather than truncated to its parent.
+    #[test]
+    fn a_continuation_comes_back_in_full() {
+        let parent = moves_for("Caro-Kann Defense").unwrap();
+        let advance = moves_for("Caro-Kann Defense: Advance Variation")
+            .expect("the Advance Variation is in the book");
+        assert!(
+            advance.len() > parent.len(),
+            "a continuation is longer than its parent: {advance:?}"
+        );
+        assert!(advance.starts_with(&parent), "it continues the same line");
+        assert_eq!(
+            identify(&advance).unwrap().name,
+            "Caro-Kann Defense: Advance Variation"
+        );
+    }
+
+    #[test]
+    fn an_unknown_name_yields_nothing() {
+        assert!(moves_for("The Advait Gambit").is_none());
     }
 }

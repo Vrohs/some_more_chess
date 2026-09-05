@@ -64,6 +64,13 @@ pub struct PlayView {
     clock: RefCell<Option<omachess_core::clock::Clock>>,
     /// Which time control the picker is on.
     control: DropDown,
+    opening_pick: DropDown,
+    /// Openings worth drilling, in the order the picker lists them after the
+    /// "From the start" entry.
+    drillable_openings: RefCell<Vec<(String, Vec<String>)>>,
+    /// The opening this game was set up in, and how many plies of it were
+    /// played before the player took over. Empty for a game from move one.
+    drilling: RefCell<Option<(String, u32)>>,
     clock_mine: Label,
     /// For each of the player's own moves, whether it was made on a low clock.
     /// Kept beside the move times so a blunder can be attributed to the clock.
@@ -125,6 +132,10 @@ impl PlayView {
         // Only the player is on a clock. The engine moves in a fixed few
         // hundred milliseconds and is not the one being trained, so a second
         // clock would be decoration standing in for a real opponent.
+        // Filled in when the view is shown: which openings are worth drilling
+        // depends on games that may not have been played yet.
+        let opening_pick = DropDown::from_strings(&["From the start"]);
+
         let clock_mine = Label::builder().halign(Align::Start).build();
         clock_mine.add_css_class("omachess-clock");
         let start = Button::with_label("New game");
@@ -167,6 +178,7 @@ impl PlayView {
             .build();
         controls.append(&side);
         controls.append(&control);
+        controls.append(&opening_pick);
         controls.append(&start);
         controls.append(&resign);
 
@@ -264,6 +276,9 @@ impl PlayView {
             turn_started: Cell::new(None),
             clock: RefCell::new(None),
             control,
+            opening_pick,
+            drillable_openings: RefCell::new(Vec::new()),
+            drilling: RefCell::new(None),
             clock_mine,
             pressured: RefCell::new(Vec::new()),
             report: RefCell::new(None),
@@ -363,6 +378,39 @@ impl PlayView {
 
     /// The strength to cap the opponent at: a little above the player, and
     /// never below what the engine is willing to do.
+    /// Refresh the list of openings worth drilling from the games on record.
+    ///
+    /// Called when the view is shown rather than once at construction: the
+    /// openings that cost the player games change as more are played.
+    pub fn refresh_openings(&self) {
+        let found =
+            omachess_core::progress::openings_to_drill(&self.store.borrow()).unwrap_or_default();
+        let mut labels = vec!["From the start".to_owned()];
+        let mut lines = Vec::new();
+        for (record, moves) in found {
+            labels.push(format!(
+                "{} ({:.0}%, {} games)",
+                record.name,
+                record.score() * 100.0,
+                record.games
+            ));
+            lines.push((record.name, moves));
+        }
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        self.opening_pick
+            .set_model(Some(&gtk4::StringList::new(&refs)));
+        self.opening_pick.set_selected(0);
+        *self.drillable_openings.borrow_mut() = lines;
+    }
+
+    /// The opening line the picker is on, if it is not "From the start".
+    fn chosen_opening(&self) -> Option<(String, Vec<String>)> {
+        let index = self.opening_pick.selected() as usize;
+        index
+            .checked_sub(1)
+            .and_then(|i| self.drillable_openings.borrow().get(i).cloned())
+    }
+
     /// The time control the picker is on, or `None` for an untimed game.
     fn chosen_control(&self) -> Option<omachess_core::clock::TimeControl> {
         control_at(self.control.selected() as usize)
@@ -470,7 +518,40 @@ impl PlayView {
         } else {
             Color::Black
         };
-        let game = Game::new(player);
+        // Starting inside a line the player keeps losing puts the practice
+        // where the losses are, instead of replaying known moves first.
+        //
+        // The game begins at the position the line reaches rather than at move
+        // one, so the book moves are never analysed as the player's own
+        // decisions — counting them would inflate accuracy and flatten the
+        // opening loss, corrupting the very figures that picked the line.
+        let opening = self.chosen_opening();
+        let game = match &opening {
+            None => Game::new(player),
+            Some((_, moves)) => {
+                let mut position = shakmaty::Chess::default();
+                for uci in moves {
+                    let Some(mv) = uci
+                        .parse::<shakmaty::uci::UciMove>()
+                        .ok()
+                        .and_then(|parsed| parsed.to_move(&position).ok())
+                    else {
+                        break;
+                    };
+                    position = match position.clone().play(mv) {
+                        Ok(next) => next,
+                        Err(_) => break,
+                    };
+                }
+                let fen =
+                    shakmaty::fen::Fen::from_position(&position, shakmaty::EnPassantMode::Legal)
+                        .to_string();
+                Game::from_fen(player, &fen).unwrap_or_else(|| Game::new(player))
+            }
+        };
+        *self.drilling.borrow_mut() = opening
+            .as_ref()
+            .map(|(name, moves)| (name.clone(), moves.len() as u32));
         self.board.set_orientation(player);
         self.board.set_position(game.position());
         self.board.select(None);
@@ -494,7 +575,10 @@ impl PlayView {
         self.review_scroll.set_visible(false);
         clear_list(&self.review_list);
         self.update_material();
-        self.status.set_label("Your move.");
+        match &opening {
+            Some((name, _)) => self.status.set_label(&format!("{name}. Play on.")),
+            None => self.status.set_label("Your move."),
+        }
         self.detail.set_label(&format!(
             "Opponent capped near {} Elo.",
             self.opponent_elo()
@@ -1027,9 +1111,12 @@ impl PlayView {
         }
         let Some((player_white, result, opening_name, book_plies)) =
             self.game.borrow().as_ref().map(|game| {
-                let (name, plies) = match omachess_core::openings::identify(game.moves()) {
-                    Some(opening) => (opening.name, opening.plies as u32),
-                    None => (String::new(), 0),
+                let (name, plies) = match self.drilling.borrow().clone() {
+                    Some(drilled) => drilled,
+                    None => match omachess_core::openings::identify(game.moves()) {
+                        Some(opening) => (opening.name, opening.plies as u32),
+                        None => (String::new(), 0),
+                    },
                 };
                 (
                     game.player() == Color::White,

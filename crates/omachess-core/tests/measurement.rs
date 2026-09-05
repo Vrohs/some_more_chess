@@ -686,3 +686,123 @@ fn time_pressure_is_measured_only_where_there_was_a_clock() {
         "expected 5x, got {multiplier}"
     );
 }
+
+/// Only openings that are actually costing games are worth drilling, and each
+/// must come back with the moves that reach it or it cannot be set up.
+#[test]
+fn only_losing_openings_are_offered_for_drilling() {
+    use omachess_core::progress::openings_to_drill;
+    use omachess_core::store::{GameRecord, PhaseLoss};
+
+    let game = |opening: &str, result: &str, day: i64| GameRecord {
+        played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap() + Duration::days(day),
+        player_white: true,
+        opponent_elo: 1320,
+        result: result.into(),
+        moves: 40,
+        accuracy: 80.0,
+        mean_loss: 0.05,
+        blunders: 1,
+        mistakes: 0,
+        inaccuracies: 0,
+        source: String::new(),
+        phases: [PhaseLoss::UNKNOWN; 3],
+        player: "vrohs".into(),
+        opening: opening.into(),
+        book_plies: 4,
+        time_control: String::new(),
+        pressure_moves: 0,
+        pressure_blunders: 0,
+    };
+
+    let store = Store::in_memory().unwrap();
+    store.set_setting("player_name", "vrohs").unwrap();
+
+    let mut day = 0;
+    for result in ["lost", "lost", "lost", "won"] {
+        store
+            .record_game(&game("Caro-Kann Defense", result, day))
+            .unwrap();
+        day += 1;
+    }
+    for result in ["won", "won", "won", "lost"] {
+        store
+            .record_game(&game("French Defense", result, day))
+            .unwrap();
+        day += 1;
+    }
+
+    let drills = openings_to_drill(&store).unwrap();
+    let names: Vec<_> = drills.iter().map(|(r, _)| r.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["Caro-Kann Defense"],
+        "an opening scoring at or above par is not what is costing games"
+    );
+    // And it comes back playable.
+    assert_eq!(drills[0].1, vec!["e2e4", "c7c6"]);
+}
+
+/// A player whose losses come from one phase should be shown their mistakes
+/// from that phase first, not a random draw from all of them.
+#[test]
+fn own_mistakes_are_narrowed_to_the_phase_that_costs_games() {
+    use omachess_core::puzzle::Puzzle;
+    use omachess_core::review::OWN_GAME_THEME;
+    use omachess_core::session::Session;
+    use omachess_core::store::AttemptRecord;
+
+    let puzzle = |id: &str, phase: &str| Puzzle {
+        id: id.into(),
+        fen: "6k1/5ppp/8/8/8/8/5PPP/1R4K1 b - - 0 1".into(),
+        moves: vec!["g8h8".into(), "b1b8".into()],
+        rating: RATING_FLOOR,
+        rating_deviation: 0,
+        popularity: 0,
+        nb_plays: 0,
+        themes: vec![OWN_GAME_THEME.into(), phase.into()],
+        game_url: String::new(),
+        opening_tags: vec![],
+    };
+
+    let mut store = Store::in_memory().unwrap();
+    store
+        .insert_puzzles(&[puzzle("mid", "middlegame"), puzzle("end", "endgame")])
+        .unwrap();
+    store.set_own_mistakes_mode(true).unwrap();
+
+    // A record showing the middlegame is the weak phase: it needs enough
+    // attempts on each to be believed.
+    let base = Utc.with_ymd_and_hms(2026, 3, 1, 9, 0, 0).unwrap();
+    for i in 0..12 {
+        for (phase, correct) in [("middlegame", i < 3), ("endgame", true)] {
+            let id = format!("hist-{phase}-{i}");
+            store.insert_puzzles(&[puzzle(&id, phase)]).unwrap();
+            store
+                .record_attempt(&AttemptRecord {
+                    puzzle_id: id,
+                    reviewed_at: base + Duration::minutes(i),
+                    elapsed: Duration::seconds(10),
+                    correct,
+                    grade: rs_fsrs::Rating::Good,
+                    puzzle_rating: RATING_FLOOR,
+                })
+                .unwrap();
+        }
+    }
+
+    let session = Session::new();
+    let served = session
+        .next_puzzle(&store, base + Duration::hours(1))
+        .unwrap()
+        .expect("a mistake to train");
+    assert!(
+        served.themes.iter().any(|t| t == "middlegame"),
+        "the phase that keeps costing games comes first, got {:?}",
+        served.themes
+    );
+    assert!(
+        served.themes.iter().any(|t| t == OWN_GAME_THEME),
+        "and it is still one of the player's own positions"
+    );
+}

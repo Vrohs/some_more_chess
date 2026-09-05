@@ -150,6 +150,53 @@ pub const ENDGAMES: &[Endgame] = &[
         dtm: None,
     },
     Endgame {
+        key: "philidor",
+        name: "Philidor: the drawing method",
+        fen: "8/8/8/8/4pk2/8/r7/4K1R1 w - - 0 1",
+        objective: Objective::Draw,
+        idea: "The other half of rook endings. Hold the third rank until the \
+               pawn advances, then check from behind and never stop.",
+        dtm: None,
+    },
+    Endgame {
+        key: "wrong-bishop",
+        name: "The wrong bishop",
+        fen: "7k/8/5K2/7P/8/8/8/5B2 w - - 0 1",
+        objective: Objective::Draw,
+        idea: "A bishop and a rook pawn, and it is still a draw: the bishop \
+               does not control the queening square, so the king simply sits \
+               in the corner. Knowing this decides whether to trade into it.",
+        dtm: None,
+    },
+    Endgame {
+        key: "opposite-bishops",
+        name: "Opposite bishops: two pawns is not enough",
+        fen: "8/8/4kb2/8/2P1P3/5B2/8/4K3 w - - 0 1",
+        objective: Objective::Draw,
+        idea: "Two extra pawns and no win, because the bishops never meet. \
+               The most common drawn endgame that looks winning.",
+        dtm: None,
+    },
+    Endgame {
+        key: "two-bishops-mate",
+        name: "Mating with two bishops",
+        fen: "8/8/8/4k3/8/8/8/2B1KB2 w - - 0 1",
+        objective: Objective::Win,
+        idea: "Easier than bishop and knight but still a technique: the \
+               bishops build a wall and the king drives along it.",
+        dtm: Some(33),
+    },
+    Endgame {
+        key: "queen-vs-rook",
+        name: "Queen against rook",
+        fen: "8/8/8/4k3/4r3/8/8/3QK3 w - - 0 1",
+        objective: Objective::Win,
+        idea: "Won, and genuinely hard: the rook has to be separated from its \
+               king by zugzwang. Sixty-five moves at best play, so the \
+               fifty-move rule is a real opponent here.",
+        dtm: Some(65),
+    },
+    Endgame {
         key: "rook-mate",
         name: "Mating with a rook",
         fen: "8/8/8/4k3/8/8/8/R3K3 w - - 0 1",

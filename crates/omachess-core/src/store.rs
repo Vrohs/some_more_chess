@@ -464,6 +464,34 @@ impl Store {
             .optional()?)
     }
 
+    /// An unseen puzzle carrying every one of `themes`, chosen at random.
+    ///
+    /// Rating plays no part: this serves the player's own mistakes, of which
+    /// there are a few hundred at most, and banding a set that small by
+    /// difficulty would mostly mean serving nothing.
+    pub fn unseen_with_themes(&self, themes: &[&str]) -> Result<Option<Puzzle>> {
+        if themes.is_empty() {
+            return Ok(None);
+        }
+        let placeholders = vec!["?"; themes.len()].join(", ");
+        let sql = format!(
+            "SELECT p.id, p.fen, p.moves, p.rating, p.rating_deviation, p.popularity,
+                    p.nb_plays, p.themes, p.game_url, p.opening_tags
+             FROM puzzles p
+             JOIN puzzle_themes t ON t.puzzle_id = p.id
+             WHERE t.theme IN ({placeholders})
+               AND NOT EXISTS (SELECT 1 FROM cards c WHERE c.puzzle_id = p.id)
+             GROUP BY p.id
+             HAVING COUNT(DISTINCT t.theme) = {}
+             ORDER BY RANDOM() LIMIT 1",
+            themes.len()
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        Ok(stmt
+            .query_row(rusqlite::params_from_iter(themes.iter()), puzzle_from_row)
+            .optional()?)
+    }
+
     fn scan_unseen(&self, low: u32, high: u32, theme: Option<&str>) -> Result<Option<Puzzle>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.id, p.fen, p.moves, p.rating, p.rating_deviation, p.popularity,

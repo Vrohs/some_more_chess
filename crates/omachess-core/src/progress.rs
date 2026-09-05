@@ -1054,6 +1054,20 @@ pub const WEAKNESS_MARGIN: f64 = 0.10;
 
 /// Themes the solver handles worse than they handle puzzles generally, worst
 /// first, together with the baseline they are being judged against.
+/// Openings worth drilling: the ones the player reaches often and scores badly
+/// in, paired with the moves that reach them.
+///
+/// Sorted worst first, so the first entry is the line to practise.
+pub fn openings_to_drill(store: &Store) -> Result<Vec<(OpeningRecord, Vec<String>)>> {
+    Ok(opening_records(store)?
+        .into_iter()
+        // Par is half a point. An opening scoring at or above it is not the
+        // one costing games, whatever else might be wrong with it.
+        .filter(|record| record.score() < 0.5)
+        .filter_map(|record| crate::openings::moves_for(&record.name).map(|moves| (record, moves)))
+        .collect())
+}
+
 /// Blunder rate on a low clock against blunder rate with time in hand.
 pub struct PressureRecord {
     /// The player's moves made with a low clock, and blunders among them.

@@ -68,6 +68,16 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// The theme a puzzle from this phase carries, matching the names the
+    /// puzzle corpus already uses so both sets can be selected the same way.
+    pub fn theme(self) -> &'static str {
+        match self {
+            Phase::Opening => "opening",
+            Phase::Middlegame => "middlegame",
+            Phase::Endgame => "endgame",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Phase::Opening => "opening",
@@ -417,6 +427,9 @@ pub fn puzzle_from(review: &MoveAnalysis, rating: u32, id: &str) -> Puzzle {
         nb_plays: 0,
         themes: vec![
             OWN_GAME_THEME.into(),
+            // The phase the mistake was made in, so a player whose losses come
+            // from one part of the game can train only that part.
+            review.phase.theme().into(),
             review
                 .severity
                 .map(Severity::label)

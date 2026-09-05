@@ -693,7 +693,7 @@ fn check_square(position: &impl Position) -> Option<Square> {
 
 #[cfg(test)]
 mod tests {
-    use super::compact;
+    use super::*;
 
     #[test]
     fn counts_are_shortened_only_once_they_are_long() {
@@ -702,5 +702,76 @@ mod tests {
         assert_eq!(compact(97_167), "97k");
         assert_eq!(compact(999_999), "1000k");
         assert_eq!(compact(4_342_467), "4.3M");
+    }
+
+    /// A span is read to judge whether a repeat is far enough from the first
+    /// solve to mean anything, so the units have to change where a reader
+    /// would change them.
+    #[test]
+    fn spans_are_read_the_way_a_person_would_say_them() {
+        use chrono::Duration;
+        assert_eq!(humanise(Duration::seconds(30)), "under a minute");
+        assert_eq!(humanise(Duration::minutes(1)), "1 min");
+        assert_eq!(humanise(Duration::minutes(59)), "59 min");
+        assert_eq!(humanise(Duration::minutes(60)), "1 h");
+        assert_eq!(humanise(Duration::hours(47)), "47 h");
+        // Two days is where hours stop being readable.
+        assert_eq!(humanise(Duration::hours(48)), "2 days");
+        assert_eq!(humanise(Duration::days(9)), "9 days");
+    }
+
+    /// The twenty-hour rule is the project's central guard, so the boundary it
+    /// is described at must not drift into reading as minutes.
+    #[test]
+    fn the_repeat_threshold_reads_in_hours() {
+        use chrono::Duration;
+        use omachess_core::store::MIN_REPEAT_HOURS;
+        let threshold = Duration::minutes((MIN_REPEAT_HOURS * 60.0) as i64);
+        assert_eq!(humanise(threshold), "20 h");
+    }
+
+    /// Check is worth hearing over a capture, and a capture over a quiet move,
+    /// so a checking capture must not be announced as an ordinary one.
+    #[test]
+    fn check_is_heard_over_a_capture() {
+        use shakmaty::{Move, Role, Square};
+        let capture = Move::Normal {
+            role: Role::Queen,
+            from: Square::D1,
+            capture: Some(Role::Pawn),
+            to: Square::D7,
+            promotion: None,
+        };
+        let quiet = Move::Normal {
+            role: Role::Queen,
+            from: Square::D1,
+            capture: None,
+            to: Square::D4,
+            promotion: None,
+        };
+        assert_eq!(cue_for(&capture, true), Cue::Check);
+        assert_eq!(cue_for(&capture, false), Cue::Capture);
+        assert_eq!(cue_for(&quiet, true), Cue::Check);
+        assert_eq!(cue_for(&quiet, false), Cue::Move);
+    }
+
+    /// The king in check is highlighted, and it must be the king of the side to
+    /// move — highlighting the other one would point at the wrong danger.
+    #[test]
+    fn the_highlighted_king_is_the_one_actually_in_check() {
+        use shakmaty::fen::Fen;
+        use shakmaty::{CastlingMode, Chess, Square};
+        let position = |fen: &str| {
+            fen.parse::<Fen>()
+                .unwrap()
+                .into_position::<Chess>(CastlingMode::Standard)
+                .unwrap()
+        };
+        // Black is in check from the queen on e7; Black is to move.
+        let checked = position("4k3/4Q3/8/8/8/8/8/4K3 b - - 0 1");
+        assert_eq!(check_square(&checked), Some(Square::E8));
+
+        let quiet = position("4k3/8/8/8/8/8/8/4K3 w - - 0 1");
+        assert_eq!(check_square(&quiet), None);
     }
 }
