@@ -142,21 +142,6 @@ impl Session {
     /// which is the only thing a solve time can be compared against.
     /// Which phase of the game the player is worst at, where one is clearly
     /// worse than the others. `None` when there is not enough to tell.
-    fn weakest_phase(&self, store: &Store) -> Result<Option<&'static str>> {
-        const PHASES: [&str; 3] = ["opening", "middlegame", "endgame"];
-        let scored = store.theme_success(crate::progress::MIN_THEME_ATTEMPTS)?;
-        let mut worst: Option<(&'static str, f64)> = None;
-        for (theme, rate, _) in &scored {
-            let Some(phase) = PHASES.iter().find(|p| *p == theme) else {
-                continue;
-            };
-            if worst.is_none_or(|(_, lowest)| *rate < lowest) {
-                worst = Some((phase, *rate));
-            }
-        }
-        Ok(worst.map(|(phase, _)| phase))
-    }
-
     pub fn next_puzzle(&self, store: &Store, now: DateTime<Utc>) -> Result<Option<Puzzle>> {
         if store.repeat_mode()? {
             // Spaced repetition decides which of the solved puzzles is ripe;
@@ -168,26 +153,6 @@ impl Session {
         }
 
         let target = store.personal_rating()?.round().max(0.0) as u32;
-
-        // Positions lifted out of your own losses are the material a coach
-        // would reach for first, and there are only ever a few dozen of them,
-        // so they have to be asked for by name or they are never served.
-        if store.own_mistakes_mode()? {
-            let own = crate::review::OWN_GAME_THEME;
-            // Narrow to the phase that keeps costing games, where one stands
-            // out — a player who loses in the middlegame should be shown their
-            // middlegame mistakes before anything else.
-            if let Some(phase) = self.weakest_phase(store)? {
-                if let Some(puzzle) = store.unseen_with_themes(&[own, phase])? {
-                    return Ok(Some(puzzle));
-                }
-            }
-            if let Some(puzzle) = store.unseen_with_themes(&[own])? {
-                return Ok(Some(puzzle));
-            }
-            // Solved out: fall through rather than stalling, and let the
-            // caller notice the stock is empty.
-        }
 
         if let Some(theme) = self.weakest_theme(store)? {
             if let Some(puzzle) = store.unseen_near_rating(target, Some(&theme))? {

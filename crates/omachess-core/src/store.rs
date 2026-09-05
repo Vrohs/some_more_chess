@@ -360,7 +360,7 @@ impl Store {
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as u32;
 
         // Steps are appended here and never renumbered or edited once shipped.
-        let steps: [&str; 7] = [
+        let steps: [&str; 8] = [
             // Imported games need an identity of their own so a re-import does
             // not duplicate them; games played in the app leave it empty.
             "ALTER TABLE games ADD COLUMN source TEXT NOT NULL DEFAULT ''",
@@ -399,6 +399,14 @@ impl Store {
             // drill cannot state an objective, and playing on from a position
             // with no idea whether you were winning teaches nothing.
             "ALTER TABLE drill_positions ADD COLUMN win_before REAL NOT NULL DEFAULT -1",
+            // Drill positions had no owner, exactly as games once had none.
+            // Importing another player's export would have turned their
+            // mistakes into yours permanently, with nothing to tell them
+            // apart. Existing rows belong to the remembered name.
+            "ALTER TABLE drill_positions ADD COLUMN player TEXT NOT NULL DEFAULT '';
+             UPDATE drill_positions SET player =
+                 COALESCE((SELECT value FROM settings WHERE key = 'player_name'), '')
+             WHERE player = ''",
         ];
 
         for (index, sql) in steps.iter().enumerate() {
@@ -574,29 +582,6 @@ impl Store {
     /// Rating plays no part: this serves the player's own mistakes, of which
     /// there are a few hundred at most, and banding a set that small by
     /// difficulty would mostly mean serving nothing.
-    pub fn unseen_with_themes(&self, themes: &[&str]) -> Result<Option<Puzzle>> {
-        if themes.is_empty() {
-            return Ok(None);
-        }
-        let placeholders = vec!["?"; themes.len()].join(", ");
-        let sql = format!(
-            "SELECT p.id, p.fen, p.moves, p.rating, p.rating_deviation, p.popularity,
-                    p.nb_plays, p.themes, p.game_url, p.opening_tags
-             FROM puzzles p
-             JOIN puzzle_themes t ON t.puzzle_id = p.id
-             WHERE t.theme IN ({placeholders})
-               AND NOT EXISTS (SELECT 1 FROM cards c WHERE c.puzzle_id = p.id)
-             GROUP BY p.id
-             HAVING COUNT(DISTINCT t.theme) = {}
-             ORDER BY RANDOM() LIMIT 1",
-            themes.len()
-        );
-        let mut stmt = self.conn.prepare_cached(&sql)?;
-        Ok(stmt
-            .query_row(rusqlite::params_from_iter(themes.iter()), puzzle_from_row)
-            .optional()?)
-    }
-
     fn scan_unseen(&self, low: u32, high: u32, theme: Option<&str>) -> Result<Option<Puzzle>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.id, p.fen, p.moves, p.rating, p.rating_deviation, p.popularity,
@@ -892,9 +877,17 @@ impl Store {
     /// Forget every imported game, so an export can be analysed again after
     /// the analysis itself has changed.
     pub fn forget_imported_games(&self) -> Result<usize> {
+        let player = self.setting("player_name")?.unwrap_or_default();
+        // The positions taken out of those games go with them. Left behind,
+        // they point at history that is no longer there.
+        self.conn.execute(
+            "DELETE FROM drill_positions
+             WHERE source <> '' AND (player = ?1 OR player = '')",
+            params![&player],
+        )?;
         Ok(self.conn.execute(
             "DELETE FROM games WHERE source <> '' AND player = ?1",
-            params![self.setting("player_name")?.unwrap_or_default()],
+            params![&player],
         )?)
     }
 
@@ -911,21 +904,54 @@ impl Store {
         )? > 0)
     }
 
+    /// Every attempt at one drill position, oldest first.
+    pub fn drill_attempts_for(&self, puzzle_id: &str) -> Result<Vec<(DateTime<Utc>, bool)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT attempted_at, achieved FROM drill_attempts
+             WHERE puzzle_id = ?1 ORDER BY attempted_at ASC",
+        )?;
+        let rows = stmt.query_map(params![puzzle_id], |r| {
+            Ok((r.get(0)?, r.get::<_, i64>(1)? != 0))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// How many positions have been mastered and set aside.
+    pub fn retired_drill_count(&self) -> Result<u32> {
+        let mut retired = 0;
+        for id in self.drill_ids()? {
+            if crate::playout::is_retired(&self.drill_attempts_for(&id)?) {
+                retired += 1;
+            }
+        }
+        Ok(retired)
+    }
+
+    fn drill_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT puzzle_id FROM drill_positions WHERE player = ?1 OR player = ''",
+        )?;
+        let player = self.setting("player_name")?.unwrap_or_default();
+        let rows = stmt.query_map(params![player], |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Drill positions worst first, so the ones that cost most come up first.
     ///
-    /// Positions already played out successfully are dropped: the point is the
-    /// ones still going wrong.
+    /// Mastered positions are left out — see [`crate::playout::is_retired`] for
+    /// what earns that. The filtering happens here rather than in SQL because
+    /// the rule is about the shape of a whole attempt history, and expressing
+    /// it in SQL would hide it from the tests that pin it.
     pub fn drills_to_play(&self, limit: u32) -> Result<Vec<(String, DrillOrigin)>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT d.puzzle_id, d.source, d.played_at, d.ply, d.played, d.best,
                     d.lost, d.phase, d.win_before
              FROM drill_positions d
-             WHERE NOT EXISTS (
-                   SELECT 1 FROM drill_attempts a
-                   WHERE a.puzzle_id = d.puzzle_id AND a.achieved = 1)
-             ORDER BY d.lost DESC LIMIT ?1",
+             WHERE d.player = ?1 OR d.player = ''
+             ORDER BY d.lost DESC",
         )?;
-        let rows = stmt.query_map(params![limit], |r| {
+        let player = self.setting("player_name")?.unwrap_or_default();
+        let rows = stmt.query_map(params![player], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 DrillOrigin {
@@ -940,7 +966,19 @@ impl Store {
                 },
             ))
         })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let all = rows.collect::<Result<Vec<(String, DrillOrigin)>, _>>()?;
+
+        let mut out = Vec::new();
+        for (id, origin) in all {
+            if out.len() as u32 >= limit {
+                break;
+            }
+            if crate::playout::is_retired(&self.drill_attempts_for(&id)?) {
+                continue;
+            }
+            out.push((id, origin));
+        }
+        Ok(out)
     }
 
     pub fn record_drill_attempt(
@@ -1046,9 +1084,21 @@ impl Store {
     ) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO drill_positions
-             (puzzle_id, source, played_at, ply, played, best, lost, phase, win_before)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![puzzle_id, source, played_at, ply, played, best, lost, phase, win_before],
+             (puzzle_id, source, played_at, ply, played, best, lost, phase, win_before,
+              player)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                puzzle_id,
+                source,
+                played_at,
+                ply,
+                played,
+                best,
+                lost,
+                phase,
+                win_before,
+                self.setting("player_name")?.unwrap_or_default(),
+            ],
         )?;
         Ok(())
     }
@@ -1519,13 +1569,6 @@ impl Store {
     /// Whether the trainer draws only from positions taken out of your own
     /// games. Sixty-odd of your own mistakes are invisible among millions of
     /// Lichess puzzles unless they are asked for by name.
-    pub fn own_mistakes_mode(&self) -> Result<bool> {
-        Ok(self.setting("own_mistakes_mode")?.as_deref() == Some("on"))
-    }
-    pub fn set_own_mistakes_mode(&self, on: bool) -> Result<()> {
-        self.set_setting("own_mistakes_mode", if on { "on" } else { "off" })
-    }
-
     /// How many puzzles carrying a theme have never been served, and how many
     /// carry it at all. The trainer needs both to say whether a mode is worth
     /// entering.

@@ -492,65 +492,6 @@ fn selection_widens_rather_than_stalling_when_a_band_is_exhausted() {
 }
 
 /// A handful of positions from your own games cannot compete with millions of
-/// Lichess puzzles on rating proximity alone, so the mode has to serve them by
-/// name — and must not stall once they are solved out.
-#[test]
-fn own_mistakes_mode_serves_your_own_positions_first() {
-    use omachess_core::puzzle::Puzzle;
-    use omachess_core::review::OWN_GAME_THEME;
-    use omachess_core::session::Session;
-
-    let puzzle = |id: &str, rating: u32, theme: &str| Puzzle {
-        id: id.into(),
-        fen: "6k1/5ppp/8/8/8/8/5PPP/1R4K1 b - - 0 1".into(),
-        moves: vec!["g8h8".into(), "b1b8".into()],
-        rating,
-        rating_deviation: 0,
-        popularity: 0,
-        nb_plays: 0,
-        themes: vec![theme.into()],
-        game_url: String::new(),
-        opening_tags: vec![],
-    };
-
-    let mut store = Store::in_memory().unwrap();
-    // A stranger's puzzle sits exactly on the target; yours is far away.
-    store
-        .insert_puzzles(&[
-            puzzle("lichess", RATING_FLOOR, "fork"),
-            puzzle("mine", RATING_FLOOR + 700, OWN_GAME_THEME),
-        ])
-        .unwrap();
-    store.set_personal_rating(f64::from(RATING_FLOOR)).unwrap();
-
-    assert_eq!(store.theme_stock(OWN_GAME_THEME).unwrap(), (1, 1));
-
-    let session = Session::new();
-    let now = Utc.with_ymd_and_hms(2026, 5, 1, 9, 0, 0).unwrap();
-
-    // Off, rating proximity wins.
-    store.set_own_mistakes_mode(false).unwrap();
-    assert_eq!(
-        session.next_puzzle(&store, now).unwrap().unwrap().id,
-        "lichess"
-    );
-
-    // On, your own position wins despite being 700 points away.
-    store.set_own_mistakes_mode(true).unwrap();
-    assert_eq!(
-        session.next_puzzle(&store, now).unwrap().unwrap().id,
-        "mine"
-    );
-
-    // Solved out, the trainer keeps working instead of stalling.
-    store.save_card("mine", &rs_fsrs::Card::new()).unwrap();
-    assert_eq!(store.theme_stock(OWN_GAME_THEME).unwrap(), (0, 1));
-    assert_eq!(
-        session.next_puzzle(&store, now).unwrap().unwrap().id,
-        "lichess"
-    );
-}
-
 /// An opening's score is only worth showing once it has been reached enough
 /// times, and the worst one has to sort first or the page buries what needs
 /// work under what does not.
@@ -741,72 +682,6 @@ fn only_losing_openings_are_offered_for_drilling() {
     );
     // And it comes back playable.
     assert_eq!(drills[0].1, vec!["e2e4", "c7c6"]);
-}
-
-/// A player whose losses come from one phase should be shown their mistakes
-/// from that phase first, not a random draw from all of them.
-#[test]
-fn own_mistakes_are_narrowed_to_the_phase_that_costs_games() {
-    use omachess_core::puzzle::Puzzle;
-    use omachess_core::review::OWN_GAME_THEME;
-    use omachess_core::session::Session;
-    use omachess_core::store::AttemptRecord;
-
-    let puzzle = |id: &str, phase: &str| Puzzle {
-        id: id.into(),
-        fen: "6k1/5ppp/8/8/8/8/5PPP/1R4K1 b - - 0 1".into(),
-        moves: vec!["g8h8".into(), "b1b8".into()],
-        rating: RATING_FLOOR,
-        rating_deviation: 0,
-        popularity: 0,
-        nb_plays: 0,
-        themes: vec![OWN_GAME_THEME.into(), phase.into()],
-        game_url: String::new(),
-        opening_tags: vec![],
-    };
-
-    let mut store = Store::in_memory().unwrap();
-    store
-        .insert_puzzles(&[puzzle("mid", "middlegame"), puzzle("end", "endgame")])
-        .unwrap();
-    store.set_own_mistakes_mode(true).unwrap();
-
-    // A record showing the middlegame is the weak phase: it needs enough
-    // attempts on each to be believed.
-    let base = Utc.with_ymd_and_hms(2026, 3, 1, 9, 0, 0).unwrap();
-    for i in 0..12 {
-        for (phase, correct) in [("middlegame", i < 3), ("endgame", true)] {
-            let id = format!("hist-{phase}-{i}");
-            store.insert_puzzles(&[puzzle(&id, phase)]).unwrap();
-            store
-                .record_attempt(&AttemptRecord {
-                    puzzle_id: id,
-                    reviewed_at: base + Duration::minutes(i),
-                    elapsed: Duration::seconds(10),
-                    correct,
-                    grade: rs_fsrs::Rating::Good,
-                    puzzle_rating: RATING_FLOOR,
-                    session_id: None,
-                    index_in_session: 0,
-                })
-                .unwrap();
-        }
-    }
-
-    let session = Session::new();
-    let served = session
-        .next_puzzle(&store, base + Duration::hours(1))
-        .unwrap()
-        .expect("a mistake to train");
-    assert!(
-        served.themes.iter().any(|t| t == "middlegame"),
-        "the phase that keeps costing games comes first, got {:?}",
-        served.themes
-    );
-    assert!(
-        served.themes.iter().any(|t| t == OWN_GAME_THEME),
-        "and it is still one of the player's own positions"
-    );
 }
 
 /// A panic is the fault worth catching: in a GTK callback it unwinds into C
@@ -1120,5 +995,197 @@ fn endgame_conversions_are_measured_against_the_tablebase() {
     assert!(
         lucena.best_conversion.unwrap() > lucena.optimal_moves.unwrap(),
         "a real conversion is slower than perfect play, which is the point"
+    );
+}
+
+/// A position is only set aside once it has genuinely been mastered, and the
+/// rule has to hold end to end — not just in the pure function that states it.
+#[test]
+fn mastered_positions_leave_the_drill_pool_and_come_back_if_lost() {
+    use omachess_core::playout::is_retired;
+
+    let store = Store::in_memory().unwrap();
+    let base = Utc.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap();
+    let record = |id: &str, lost: f64| {
+        store
+            .record_drill_origin(
+                id,
+                "https://lichess.org/g",
+                base,
+                40,
+                "Qh1",
+                "Qg3",
+                lost,
+                "middlegame",
+                0.8,
+            )
+            .unwrap();
+    };
+    record("worst", 0.9);
+    record("mild", 0.2);
+
+    let ids = |limit: u32| -> Vec<String> {
+        store
+            .drills_to_play(limit)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    };
+
+    // Worst first, both on offer.
+    assert_eq!(ids(10), vec!["worst", "mild"]);
+
+    // One success is not enough to set it aside.
+    store
+        .record_drill_attempt("worst", base, true, 30, "won")
+        .unwrap();
+    assert_eq!(ids(10), vec!["worst", "mild"], "one win proves little");
+
+    // A second success too soon after is recall, not mastery.
+    store
+        .record_drill_attempt("worst", base + Duration::hours(2), true, 28, "won")
+        .unwrap();
+    assert_eq!(
+        ids(10),
+        vec!["worst", "mild"],
+        "same sitting does not count"
+    );
+
+    // Far enough apart, it is mastered and leaves the pool.
+    store
+        .record_drill_attempt("worst", base + Duration::hours(30), true, 26, "won")
+        .unwrap();
+    assert_eq!(ids(10), vec!["mild"], "mastered, so it stops taking space");
+    assert_eq!(store.retired_drill_count().unwrap(), 1);
+    assert!(is_retired(&store.drill_attempts_for("worst").unwrap()));
+
+    // Losing it again brings it straight back.
+    store
+        .record_drill_attempt("worst", base + Duration::hours(60), false, 41, "lost")
+        .unwrap();
+    assert_eq!(ids(10), vec!["worst", "mild"], "a loss puts it back");
+    assert_eq!(store.retired_drill_count().unwrap(), 0);
+}
+
+/// Games once had no owner and another player's import silently became your
+/// record. The positions taken out of those games had the same hole.
+#[test]
+fn another_players_drill_positions_are_not_offered_as_yours() {
+    let store = Store::in_memory().unwrap();
+    let base = Utc.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap();
+
+    store.set_setting("player_name", "vrohs").unwrap();
+    store
+        .record_drill_origin(
+            "mine",
+            "https://lichess.org/a",
+            base,
+            40,
+            "Qh1",
+            "Qg3",
+            0.9,
+            "middlegame",
+            0.8,
+        )
+        .unwrap();
+
+    // A second profile imports their own export into the same database.
+    store.set_setting("player_name", "someone_else").unwrap();
+    store
+        .record_drill_origin(
+            "theirs",
+            "https://lichess.org/b",
+            base,
+            20,
+            "Nf3",
+            "Bc4",
+            0.95,
+            "opening",
+            0.7,
+        )
+        .unwrap();
+
+    let offered: Vec<String> = store
+        .drills_to_play(10)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(offered, vec!["theirs"], "only the current player's own");
+
+    store.set_setting("player_name", "vrohs").unwrap();
+    let offered: Vec<String> = store
+        .drills_to_play(10)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(offered, vec!["mine"], "and theirs never leaks back");
+}
+
+/// Re-analysing an export drops the games; the positions taken out of them
+/// have to go too, or they outlive the history they point at.
+#[test]
+fn forgetting_imported_games_takes_their_positions_with_them() {
+    use omachess_core::store::{GameRecord, PhaseLoss};
+
+    let store = Store::in_memory().unwrap();
+    let base = Utc.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap();
+    store.set_setting("player_name", "vrohs").unwrap();
+    store
+        .record_game(&GameRecord {
+            played_at: base,
+            player_white: true,
+            opponent_elo: 1320,
+            result: "lost".into(),
+            moves: 40,
+            accuracy: 80.0,
+            mean_loss: 0.05,
+            blunders: 1,
+            mistakes: 0,
+            inaccuracies: 0,
+            source: "https://lichess.org/a".into(),
+            phases: [PhaseLoss::UNKNOWN; 3],
+            player: "vrohs".into(),
+            opening: String::new(),
+            book_plies: 0,
+            time_control: String::new(),
+            pressure_moves: 0,
+            pressure_blunders: 0,
+        })
+        .unwrap();
+    store
+        .record_drill_origin(
+            "from-import",
+            "https://lichess.org/a",
+            base,
+            40,
+            "Qh1",
+            "Qg3",
+            0.9,
+            "middlegame",
+            0.8,
+        )
+        .unwrap();
+    // One from a game played in the application, which has no source and must
+    // survive: it was never part of the import.
+    store
+        .record_drill_origin("from-here", "", base, 30, "Nf3", "Bc4", 0.5, "opening", 0.6)
+        .unwrap();
+
+    assert_eq!(store.drills_to_play(10).unwrap().len(), 2);
+    store.forget_imported_games().unwrap();
+
+    let left: Vec<String> = store
+        .drills_to_play(10)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        left,
+        vec!["from-here"],
+        "imported positions go with their games"
     );
 }

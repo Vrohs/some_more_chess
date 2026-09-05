@@ -296,11 +296,31 @@ impl DrillView {
     }
 
     fn show_record(&self) {
-        let (attempts, achieved) = self.store.borrow().drill_playout_record().unwrap_or((0, 0));
-        self.record.set_label(&if attempts == 0 {
-            "No position played out yet.".to_owned()
+        let (attempts, achieved, retired) = {
+            let store = self.store.borrow();
+            (
+                store.drill_playout_record().unwrap_or((0, 0)).0,
+                store.drill_playout_record().unwrap_or((0, 0)).1,
+                store.retired_drill_count().unwrap_or(0),
+            )
+        };
+        let waiting = self.positions.borrow().len();
+
+        // Said out loud: a position quietly vanishing from the list looks like
+        // a bug rather than like progress.
+        let mastered = if retired == 0 {
+            String::new()
         } else {
-            format!("{achieved} of {attempts} played out successfully.")
+            format!(
+                " {retired} mastered and set aside — won twice at least {:.0}h apart, \
+                 most recently.",
+                omachess_core::store::MIN_REPEAT_HOURS
+            )
+        };
+        self.record.set_label(&if attempts == 0 {
+            format!("{waiting} positions waiting. None played out yet.{mastered}")
+        } else {
+            format!("{achieved} of {attempts} played out successfully.{mastered}")
         });
     }
 
