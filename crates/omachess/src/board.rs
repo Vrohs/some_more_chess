@@ -513,6 +513,42 @@ impl BoardView {
         }
     }
 
+    /// Drag a piece from one square to another, exactly as the pointer would.
+    ///
+    /// The pointer itself cannot be driven from here — synthetic input does not
+    /// reach GTK on this compositor — so this enters at the same place the
+    /// gesture does. It cannot prove the piece follows the cursor; it can prove
+    /// the drag is wired to something, which is the half that has broken.
+    pub(crate) fn drag(&self, from: Square, to: Square) {
+        self.on_drag(from, to);
+    }
+
+    /// Where the keyboard cursor is, for anyone playing without a mouse.
+    pub(crate) fn cursor(&self) -> Option<Square> {
+        self.cursor.get()
+    }
+
+    /// Step the keyboard cursor, as an arrow key does.
+    pub(crate) fn press_arrow(&self, dx: i32, dy: i32) {
+        self.move_cursor(dx, dy);
+    }
+
+    /// Whether a square is carrying a styling class. The highlights are the
+    /// board's whole vocabulary — check, mate, the move just played — and each
+    /// is one CSS class that is either on the right square or on none.
+    pub(crate) fn square_has_class(&self, square: Square, class: &str) -> bool {
+        self.squares[square as usize].cell.has_css_class(class)
+    }
+
+    /// Where a square actually sits in the grid.
+    ///
+    /// Orientation is not a flag, it is sixty-four widgets moving. Asking the
+    /// grid where a square ended up is the only way to tell the two apart.
+    pub(crate) fn grid_slot(&self, square: Square) -> (i32, i32) {
+        let (column, row, _, _) = self.grid.query_child(&self.squares[square as usize].cell);
+        (column, row)
+    }
+
     /// Which square lies under a point in grid coordinates.
     ///
     /// Hit-testing by picking the widget is exact, where dividing the grid

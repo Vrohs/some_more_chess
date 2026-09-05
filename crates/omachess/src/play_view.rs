@@ -367,6 +367,72 @@ impl PlayView {
         view
     }
 
+    /// Entry points for the self-test, which drives the real view rather than
+    /// the logic underneath it. Every defect this tab has shipped was a handler
+    /// that was never connected, and none of it is reachable any other way.
+    pub(crate) fn board(&self) -> &Rc<BoardView> {
+        &self.board
+    }
+
+    pub(crate) fn begin_game(&self) {
+        self.start_game();
+    }
+
+    pub(crate) fn give_up(self: &Rc<Self>) {
+        self.resign_game();
+    }
+
+    /// How many plies have been played, which is what a move having been
+    /// accepted actually looks like.
+    pub(crate) fn moves_played(&self) -> usize {
+        self.game
+            .borrow()
+            .as_ref()
+            .map(|game| game.moves().len())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn game_running(&self) -> bool {
+        self.game
+            .borrow()
+            .as_ref()
+            .is_some_and(|game| game.end_reason().is_none())
+    }
+
+    /// What the tab is telling the player, so a check can quote it back when
+    /// something goes wrong instead of reporting a bare false.
+    pub(crate) fn describe_state(&self) -> String {
+        format!(
+            "status {:?} / opening {:?} / material {:?} / {} plies",
+            self.status.text(),
+            self.opening.text(),
+            self.material.text(),
+            self.moves_played()
+        )
+    }
+
+    /// The line under the status, which after a game carries the report.
+    pub(crate) fn detail_text(&self) -> String {
+        self.detail.text().to_string()
+    }
+
+    pub(crate) fn banner_text(&self) -> String {
+        self.banner.text().to_string()
+    }
+
+    /// Choose a time control by its place in the picker, as clicking it does.
+    pub(crate) fn pick_time_control(&self, index: u32) {
+        self.control.set_selected(index);
+    }
+
+    pub(crate) fn clock_text(&self) -> String {
+        self.clock_mine.text().to_string()
+    }
+
+    pub(crate) fn opening_text(&self) -> String {
+        self.opening.text().to_string()
+    }
+
     pub fn widget(&self) -> &GtkBox {
         &self.root
     }

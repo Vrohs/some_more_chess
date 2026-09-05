@@ -208,6 +208,38 @@ impl EndgameView {
         view
     }
 
+    /// Entry points for the self-test. Same reason as everywhere else: the
+    /// rules underneath are covered and the wiring is not.
+    pub(crate) fn board(&self) -> &Rc<BoardView> {
+        &self.board
+    }
+
+    pub(crate) fn begin_attempt(&self) {
+        self.begin();
+    }
+
+    pub(crate) fn moves_played(&self) -> usize {
+        self.game
+            .borrow()
+            .as_ref()
+            .map(|game| game.moves().len())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn describe_state(&self) -> String {
+        format!(
+            "{} / objective {:?} / status {:?} / {} plies",
+            self.entry().name,
+            self.objective.text(),
+            self.status.text(),
+            self.moves_played()
+        )
+    }
+
+    pub(crate) fn countdown_text(&self) -> String {
+        self.countdown.text().to_string()
+    }
+
     pub fn widget(&self) -> &GtkBox {
         &self.root
     }

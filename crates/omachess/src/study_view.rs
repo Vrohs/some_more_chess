@@ -276,6 +276,50 @@ impl StudyView {
         view
     }
 
+    /// Entry points for the self-test.
+    pub(crate) fn games_loaded(&self) -> usize {
+        self.games.borrow().len()
+    }
+
+    /// How many plies into the game the cursor is.
+    pub(crate) fn ply(&self) -> usize {
+        self.walk
+            .borrow()
+            .as_ref()
+            .map(|walk| walk.moves_so_far().len())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn go_forward(self: &Rc<Self>) {
+        self.step(Step::Forward);
+    }
+
+    pub(crate) fn go_back(self: &Rc<Self>) {
+        self.step(Step::Back);
+    }
+
+    /// The engine's line. This is the one label nothing else fills in: the
+    /// evaluation and the "played here" line are both written from the game
+    /// itself before a single node is searched, so asserting on those proves
+    /// only that a PGN was read.
+    pub(crate) fn variation_text(&self) -> String {
+        self.variation.text().to_string()
+    }
+
+    pub(crate) fn scoresheet_text(&self) -> String {
+        self.moves.text().to_string()
+    }
+
+    pub(crate) fn describe_state(&self) -> String {
+        format!(
+            "{} games / ply {} / eval {:?} / best {:?}",
+            self.games_loaded(),
+            self.ply(),
+            self.evaluation.text(),
+            self.best.text()
+        )
+    }
+
     pub fn widget(&self) -> &GtkBox {
         &self.root
     }

@@ -352,6 +352,7 @@ impl Trainer {
                     self.board.select(None);
                     self.board.set_last_move(None);
                     self.board.set_check(None);
+                    self.board.set_mate(None);
                     let side = match attempt.position().turn() {
                         shakmaty::Color::White => "White",
                         shakmaty::Color::Black => "Black",
@@ -732,6 +733,13 @@ impl Trainer {
                     self.board.set_position(current.attempt.position());
                     self.board
                         .set_check(check_square(current.attempt.position()));
+                    // Most puzzles end in mate, and the board has a louder mark
+                    // for it than for check. Only Play was ever using it, so
+                    // every mating puzzle finished looking like an ordinary
+                    // check — the one thing the board most needs to say, said
+                    // in the quieter of its two voices.
+                    self.board
+                        .set_mate(mate_square(current.attempt.position()));
                 }
                 self.board
                     .set_last_move(mv.from().map(|from| (from, mv.to())));
@@ -856,6 +864,14 @@ fn humanise(span: Span) -> String {
 }
 
 /// The square of the king that is currently in check, if any.
+/// The mated king, if the position on the board is checkmate.
+fn mate_square(position: &impl Position) -> Option<Square> {
+    position
+        .is_checkmate()
+        .then(|| position.board().king_of(position.turn()))
+        .flatten()
+}
+
 fn check_square(position: &impl Position) -> Option<Square> {
     position
         .is_check()

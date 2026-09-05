@@ -91,6 +91,24 @@ impl Sounds {
         self.player.is_some()
     }
 
+    /// Cues with no clip on disk. Each one is a moment that plays in silence,
+    /// and silence is indistinguishable from the sound being switched off, so
+    /// nobody would ever report it.
+    pub(crate) fn missing_clips(&self) -> Vec<&'static str> {
+        [
+            Cue::Move,
+            Cue::Capture,
+            Cue::Check,
+            Cue::Wrong,
+            Cue::Solved,
+            Cue::End,
+        ]
+        .into_iter()
+        .filter(|cue| !self.dir.join(format!("{}.wav", cue.name())).is_file())
+        .map(Cue::name)
+        .collect()
+    }
+
     /// Play a cue, without waiting for it and without caring if it fails.
     pub fn play(&self, cue: Cue) {
         let Some(player) = &self.player else {

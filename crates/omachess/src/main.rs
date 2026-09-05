@@ -68,7 +68,7 @@ fn main() -> ExitCode {
         Some("games") => command_games(),
         Some("doctor") => command_doctor(),
         Some("today") => command_today(),
-        Some("selftest") => command_selftest(),
+        Some("selftest") => command_selftest(args.get(1).cloned()),
         Some("--version" | "-V" | "version") => {
             println!("{}", describe_build());
             Ok(())
@@ -106,7 +106,8 @@ USAGE:
     omachess games           Show how well you have been playing the engine
     omachess today           What to train now, and the measurement behind it
     omachess --version       Which build is running, and from where
-    omachess selftest        Drive the real views and report what works
+    omachess selftest [WORD] Drive the real views and report what works. WORD
+                             runs only the checks whose name contains it.
     omachess doctor          Faults recorded, and the raw data behind training
     omachess export <FILE>   Write your history to a file you can keep
     omachess restore <FILE>  Merge a history file back in
@@ -752,7 +753,7 @@ fn run_app(study: Option<PathBuf>) -> anyhow::Result<()> {
 ///
 /// A distinct application id, so this never activates the window you are
 /// using and never shares its database.
-fn command_selftest() -> anyhow::Result<()> {
+fn command_selftest(filter: Option<String>) -> anyhow::Result<()> {
     let app = adw::Application::builder()
         .application_id("dev.omachess.Omachess.SelfTest")
         .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
@@ -763,7 +764,7 @@ fn command_selftest() -> anyhow::Result<()> {
         style::install();
         let pieces = pieces::PieceSet::discover(&paths::pieces_dir()).map(std::rc::Rc::new);
         let sounds = std::rc::Rc::new(sound::Sounds::new());
-        result.set(selftest::run(pieces, sounds));
+        result.set(selftest::run(pieces, sounds, filter.as_deref()));
         app.quit();
     });
     app.run_with_args::<&str>(&[]);
