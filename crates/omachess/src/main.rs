@@ -9,7 +9,6 @@ mod engine_worker;
 mod pieces;
 mod play_view;
 mod progress_view;
-mod promotion;
 mod selftest;
 mod sound;
 mod study_view;

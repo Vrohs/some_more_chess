@@ -471,7 +471,7 @@ impl DrillView {
                 .map(|game| game.player() == Color::White)
                 .unwrap_or(true);
             let view = self.clone();
-            crate::promotion::ask(self.board.widget(), &choices, white, move |role| {
+            self.board.ask_promotion(to, white, &choices, move |role| {
                 view.play_promoting(from, to, Some(role));
             });
             return;

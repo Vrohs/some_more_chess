@@ -36,6 +36,18 @@ fn check(name: &'static str, body: impl FnOnce() -> Result<(), String>) -> Check
     }
 }
 
+/// Give a widget a real size, so anything that reads its allocation sees one.
+///
+/// The promotion picker is positioned from the destination square's
+/// allocation, so a board that was never allocated cannot be checked at all —
+/// it would take the "no board to draw on" path and look like a pass.
+fn allocate(widget: &impl gtk4::prelude::IsA<gtk4::Widget>, side: i32) {
+    use gtk4::prelude::*;
+    let widget = widget.as_ref();
+    widget.set_size_request(side, side);
+    widget.allocate(side, side, -1, None);
+}
+
 fn expect(condition: bool, complaint: &str) -> Result<(), String> {
     if condition {
         Ok(())
@@ -316,6 +328,46 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>) -> bool {
         expect(
             choices.len() == 4,
             "a promoting pawn was not offered every piece",
+        )
+    }));
+
+    // The question was asked and nobody could see it: a `GtkPopover` with
+    // autohide dismisses itself the instant it fails to take a grab, which it
+    // does when it is raised out of the drag gesture that asked for it. The
+    // pawn stayed put with nothing on screen to say why, and the check above
+    // passed the whole time, because it only ever asked the rules. This one
+    // asks the board.
+    checks.push(check("the promotion picker appears and can be clicked", || {
+        use shakmaty::Role;
+
+        let board = crate::board::BoardView::new(None);
+        allocate(board.widget(), 480);
+
+        let picked = Rc::new(std::cell::Cell::new(None));
+        let record = picked.clone();
+        board.ask_promotion(
+            Square::A8,
+            true,
+            &[Role::Queen, Role::Rook, Role::Bishop, Role::Knight],
+            move |role| record.set(Some(role)),
+        );
+        expect(
+            board.promotion_showing(),
+            "the promotion picker never became visible",
+        )?;
+        expect(
+            board.promotion_choice_count() == 4,
+            "the promotion picker did not offer every piece",
+        )?;
+
+        board.click_promotion_choice(Role::Knight)?;
+        expect(
+            picked.get() == Some(Role::Knight),
+            "clicking a promotion choice reported nothing",
+        )?;
+        expect(
+            !board.promotion_showing(),
+            "the promotion picker stayed up after a choice",
         )
     }));
 

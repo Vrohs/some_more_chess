@@ -109,11 +109,32 @@ const DEFAULT_CSS: &str = r#"
 .omachess-coord.on-light { color: #6b4423; }
 .omachess-coord.on-dark  { color: #e9cfa6; }
 .omachess-status { font-size: 15px; }
-/* The promotion choices are figurine glyphs, which need room to be readable. */
-.omachess-promotion {
-    font-size: 26px;
-    padding: 2px 8px;
-    min-width: 40px;
+/* The promotion picker sits on the board itself. The column is opaque so the
+   pieces underneath cannot be mistaken for part of the choice, and the rest of
+   the board is dimmed so it reads as waiting for an answer. */
+.omachess-promo-shade {
+    background-color: rgba(0, 0, 0, 0.45);
+}
+.omachess-promo {
+    background-color: #f2e4cd;
+    border: 2px solid #6b4423;
+    border-radius: 4px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+}
+.omachess-promo-choice {
+    background: none;
+    border: none;
+    box-shadow: none;
+    padding: 2px;
+    min-width: 0;
+    min-height: 0;
+}
+.omachess-promo-choice:hover {
+    background-color: rgba(107, 68, 35, 0.25);
+}
+/* The glyph fallback has no art to scale, so it is sized to fill the square. */
+.omachess-promo-choice .omachess-piece {
+    font-size: 34px;
 }
 /* The clock is read at a glance under pressure, so it is large, monospaced so
    the digits do not shift as they count, and turns red once the move is being

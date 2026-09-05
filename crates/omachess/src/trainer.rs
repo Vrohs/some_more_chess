@@ -630,7 +630,7 @@ impl Trainer {
                 .map(|current| current.attempt.position().turn() == shakmaty::Color::White)
                 .unwrap_or(true);
             let trainer = self.clone();
-            crate::promotion::ask(self.board.widget(), &choices, white, move |role| {
+            self.board.ask_promotion(to, white, &choices, move |role| {
                 let prefer = crate::play_view::promotion_uci(from, to, role);
                 let found = {
                     let current = trainer.current.borrow();

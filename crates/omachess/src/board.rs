@@ -10,8 +10,8 @@ use std::rc::{Rc, Weak};
 
 use gtk4::prelude::*;
 use gtk4::{
-    gdk, Align, Box as GtkBox, EventControllerKey, Fixed, GestureDrag, Grid, Label, Orientation,
-    Overlay, Picture,
+    gdk, Align, Box as GtkBox, Button, EventControllerKey, Fixed, GestureDrag, GestureClick, Grid,
+    Label, Orientation, Overlay, Picture,
 };
 use shakmaty::{Chess, Color, Position, Role, Square};
 
@@ -70,6 +70,22 @@ pub struct BoardView {
     /// released on would not be the square under the cursor.
     ghost_layer: Fixed,
     ghost: Picture,
+    /// The promotion picker, drawn on the board rather than in a popup.
+    ///
+    /// A `GtkPopover` was tried first and could not be trusted here: an
+    /// autohide popover dismisses itself the moment it fails to take a grab,
+    /// which it does when it is raised out of the drag gesture that asked for
+    /// it. The pawn then stayed on its old square with nothing on screen to
+    /// say why. Ordinary widgets inside the board's own overlay take no grab,
+    /// so they cannot disappear between being shown and being clicked.
+    promo_layer: Fixed,
+    /// Covers the whole board while the picker is up, so a stray click
+    /// cancels the promotion instead of starting another move underneath it.
+    promo_shade: GtkBox,
+    promo_column: GtkBox,
+    /// The offered pieces in the order they are drawn, so a test can click
+    /// one by name rather than by guessing which child it is.
+    promo_roles: RefCell<Vec<Role>>,
     grid: Grid,
     squares: Vec<SquareWidgets>,
     handler: RefCell<Option<SquareHandler>>,
@@ -188,14 +204,31 @@ impl BoardView {
         let ghost_layer = Fixed::builder().can_target(false).build();
         ghost_layer.put(&ghost, 0.0, 0.0);
 
+        let promo_shade = GtkBox::builder()
+            .css_classes(vec!["omachess-promo-shade".to_owned()])
+            .build();
+        let promo_column = GtkBox::builder()
+            .orientation(Orientation::Vertical)
+            .css_classes(vec!["omachess-promo".to_owned()])
+            .build();
+        let promo_layer = Fixed::builder().visible(false).build();
+        promo_layer.put(&promo_shade, 0.0, 0.0);
+        promo_layer.put(&promo_column, 0.0, 0.0);
+
         let root = Overlay::builder().child(&grid).build();
         root.add_overlay(&ghost_layer);
         root.set_measure_overlay(&ghost_layer, false);
+        root.add_overlay(&promo_layer);
+        root.set_measure_overlay(&promo_layer, false);
 
         let view = Rc::new(Self {
             root,
             ghost_layer,
             ghost,
+            promo_layer,
+            promo_shade,
+            promo_column,
+            promo_roles: RefCell::new(Vec::new()),
             grid,
             squares,
             handler: RefCell::new(None),
@@ -280,7 +313,150 @@ impl BoardView {
         });
         view.grid.add_controller(keys);
 
+        // Anywhere on the board that is not one of the offered pieces cancels
+        // the promotion, leaving the pawn where it was. A move the player did
+        // not choose is worse than no move at all.
+        let cancel = GestureClick::new();
+        let weak: Weak<Self> = Rc::downgrade(&view);
+        cancel.connect_pressed(move |_, _, _, _| {
+            if let Some(view) = weak.upgrade() {
+                view.dismiss_promotion();
+            }
+        });
+        view.promo_shade.add_controller(cancel);
+
         view
+    }
+
+    /// Offer the pieces a pawn can become, as a column on the board itself.
+    ///
+    /// The column starts on the promotion square and runs into the board,
+    /// which is where every chess site puts it, so the piece being chosen sits
+    /// under the pointer that just dragged the pawn there.
+    pub fn ask_promotion(
+        self: &Rc<Self>,
+        to: Square,
+        white: bool,
+        choices: &[Role],
+        chosen: impl Fn(Role) + 'static,
+    ) {
+        self.dismiss_promotion();
+        if choices.is_empty() {
+            return;
+        }
+
+        let allocation = self.squares[to as usize].cell.allocation();
+        let size = allocation.width().min(allocation.height());
+        if size <= 0 {
+            // Nothing has been allocated yet, so there is no board to draw on
+            // and no coordinates to draw at.
+            return;
+        }
+
+        // Rank 8 and rank 1 are always the top and bottom rows on screen, so
+        // the only question is which way the column has room to run.
+        let downward = grid_position(to, *self.orientation.borrow()).1 == 0;
+        let top = if downward {
+            allocation.y()
+        } else {
+            allocation.y() - (choices.len() as i32 - 1) * size
+        };
+
+        self.promo_shade
+            .set_size_request(self.grid.width(), self.grid.height());
+
+        // Whichever way the column runs, the first choice — the queen — is the
+        // one touching the promotion square, so the common case is the nearest.
+        let ordered: Vec<Role> = if downward {
+            choices.to_vec()
+        } else {
+            choices.iter().rev().copied().collect()
+        };
+        let colour = if white { Color::White } else { Color::Black };
+        let chosen = Rc::new(chosen);
+        for role in ordered {
+            let button = Button::builder()
+                .width_request(size)
+                .height_request(size)
+                .css_classes(vec!["omachess-promo-choice".to_owned()])
+                .build();
+            match self.pieces.as_ref().and_then(|set| set.texture(colour, role)) {
+                Some(texture) => {
+                    let art = Picture::builder()
+                        .paintable(texture)
+                        .can_shrink(true)
+                        .halign(Align::Fill)
+                        .valign(Align::Fill)
+                        .build();
+                    art.add_css_class("omachess-piece");
+                    button.set_child(Some(&art));
+                }
+                None => {
+                    let label = Label::new(Some(&glyph(role).to_string()));
+                    label.add_css_class("omachess-piece");
+                    label.add_css_class(if white { "white-piece" } else { "black-piece" });
+                    button.set_child(Some(&label));
+                }
+            }
+            let chosen = chosen.clone();
+            let weak: Weak<Self> = Rc::downgrade(self);
+            button.connect_clicked(move |_| {
+                // Taken down first: the handler redraws the board, and the
+                // picker must not still be sitting over the new position.
+                if let Some(view) = weak.upgrade() {
+                    view.dismiss_promotion();
+                }
+                chosen(role);
+            });
+            self.promo_column.append(&button);
+            self.promo_roles.borrow_mut().push(role);
+        }
+
+        self.promo_layer.move_(&self.promo_shade, 0.0, 0.0);
+        self.promo_layer
+            .move_(&self.promo_column, f64::from(allocation.x()), f64::from(top));
+        self.promo_layer.set_visible(true);
+    }
+
+    /// Take the picker down, dropping the choice handler with it.
+    pub fn dismiss_promotion(&self) {
+        self.promo_layer.set_visible(false);
+        self.promo_roles.borrow_mut().clear();
+        while let Some(child) = self.promo_column.first_child() {
+            self.promo_column.remove(&child);
+        }
+    }
+
+    /// Whether the picker is on screen. The bug worth catching is a picker
+    /// that was built and never shown, which no rules test can see.
+    pub(crate) fn promotion_showing(&self) -> bool {
+        self.promo_layer.is_visible()
+    }
+
+    pub(crate) fn promotion_choice_count(&self) -> usize {
+        self.promo_roles.borrow().len()
+    }
+
+    /// Click an offered piece, exactly as the pointer would.
+    pub(crate) fn click_promotion_choice(&self, role: Role) -> Result<(), String> {
+        let index = self
+            .promo_roles
+            .borrow()
+            .iter()
+            .position(|offered| *offered == role)
+            .ok_or_else(|| format!("{role:?} was not offered"))?;
+        let mut child = self
+            .promo_column
+            .first_child()
+            .ok_or("the picker had no choices in it")?;
+        for _ in 0..index {
+            child = child.next_sibling().ok_or("the picker was short a choice")?;
+        }
+        child
+            .downcast_ref::<Button>()
+            .ok_or("a promotion choice was not a button")?
+            .emit_clicked();
+        Ok(())
     }
 
     pub fn widget(&self) -> &Overlay {
