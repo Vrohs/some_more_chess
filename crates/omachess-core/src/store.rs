@@ -700,11 +700,18 @@ impl Store {
     /// Success rate per theme, for themes with at least `min_attempts` tries.
     /// Used to steer selection toward weaknesses.
     pub fn theme_success(&self, min_attempts: u32) -> Result<Vec<(String, f64, u32)>> {
+        // CROSS JOIN, deliberately: it is SQLite's one way of fixing the loop
+        // order, and the order is the whole cost here. `puzzle_themes` holds
+        // nineteen million rows against a few dozen attempts, and `GROUP BY
+        // t.theme` tempts the planner into scanning the theme index end to end
+        // to avoid a sort — three seconds of it, on the UI thread, every time
+        // the Progress tab was opened. Driving from `attempts` and looking each
+        // puzzle up by its primary key takes five milliseconds.
         let mut stmt = self.conn.prepare_cached(
             "SELECT t.theme,
                     AVG(a.correct) AS rate,
                     COUNT(*)       AS tries
-             FROM attempts a JOIN puzzle_themes t ON t.puzzle_id = a.puzzle_id
+             FROM attempts a CROSS JOIN puzzle_themes t ON t.puzzle_id = a.puzzle_id
              GROUP BY t.theme
              HAVING tries >= ?1
              ORDER BY rate ASC",
@@ -1692,6 +1699,47 @@ fn random_cursor() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The Progress tab took six seconds to open, all of it on the thread
+    /// drawing the window, and two thirds of that was this one query going
+    /// round its loops the wrong way: nineteen million theme rows scanned to
+    /// join against forty-two attempts.
+    ///
+    /// The assertion is on the plan rather than on a stopwatch. A timing test
+    /// would need a corpus this size to mean anything and would still measure
+    /// the machine; the loop order is the actual defect and it is visible in a
+    /// database with nothing in it.
+    #[test]
+    fn theme_success_drives_from_the_attempts_not_the_nineteen_million_themes() {
+        let store = super::Store::in_memory().expect("a store");
+        let mut stmt = store
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT t.theme, AVG(a.correct) AS rate, COUNT(*) AS tries
+                 FROM attempts a CROSS JOIN puzzle_themes t
+                   ON t.puzzle_id = a.puzzle_id
+                 GROUP BY t.theme HAVING tries >= 1",
+            )
+            .expect("a plan");
+        let steps: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("rows")
+            .collect::<Result<_, _>>()
+            .expect("plan rows");
+        let outer = steps.first().expect("the plan says nothing");
+        assert!(
+            outer.contains("SCAN a"),
+            "the join drives from {outer:?} rather than from the attempts, \
+             which is the six-second version"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|step| step.contains("SEARCH t") && step.contains("PRIMARY KEY")),
+            "themes are no longer looked up by puzzle id: {steps:?}"
+        );
+    }
+
     use super::*;
 
     fn columns(store: &Store, table: &str) -> Vec<String> {

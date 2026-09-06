@@ -49,19 +49,25 @@ fn main() -> ExitCode {
         gtk4::glib::log_default_handler(domain, level, Some(message));
     });
 
-    // Rust masks SIGPIPE and turns a closed pipe into a panic instead. That
-    // makes `omachess doctor | head` record a panic in the fault log and then
-    // tell the reader "the window closed on you", which is a lie, and a fault
-    // log that cries wolf is worse than none. Hand the signal back to the
-    // kernel and the process exits quietly, the way every other Unix tool does.
-    //
-    // Safe: setting a disposition to SIG_DFL before any thread is started.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
-
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str);
+
+    // Rust masks SIGPIPE, so `omachess doctor | head` panics rather than
+    // stopping quietly. Handing the signal back to the kernel fixes that — but
+    // only for a command that prints and exits. Doing it process-wide, which is
+    // what this used to do, is fatal to the window: the engine is a child
+    // process the application writes to, and once that child has gone the very
+    // next write kills the whole application on the spot. SIGPIPE terminates
+    // without a core dump and without unwinding, so nothing reaches the panic
+    // hook and nothing reaches `coredumpctl`. The window simply vanishes and
+    // there is no record anywhere that it ever existed.
+    //
+    // Safe: setting a disposition before any thread is started.
+    if prints_and_exits(command) {
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
     let result = match command {
         Some("ingest") => command_ingest(args.get(1).map(PathBuf::from)),
         Some("status") => command_status(),
@@ -101,6 +107,30 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Whether this command just writes to stdout and exits.
+///
+/// Anything that opens a window or talks to the engine must keep Rust's masked
+/// SIGPIPE, so a departed child process returns an error to be handled instead
+/// of killing the application where it stands.
+fn prints_and_exits(command: Option<&str>) -> bool {
+    matches!(
+        command,
+        Some(
+            "status"
+                | "progress"
+                | "games"
+                | "today"
+                | "doctor"
+                | "export"
+                | "version"
+                | "--version"
+                | "-V"
+                | "--help"
+                | "-h"
+        )
+    )
 }
 
 fn print_usage() {
@@ -996,6 +1026,31 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The window and the engine must never run with SIGPIPE unmasked.
+    ///
+    /// This was set process-wide once, to stop `doctor | head` writing a false
+    /// panic into the fault log, and it made the application die silently the
+    /// first time it wrote to an engine that had already gone: no core dump, no
+    /// fault record, no message. The cheap fix for a cosmetic problem cost the
+    /// most expensive property the process has, which is being able to say why
+    /// it stopped.
+    #[test]
+    fn nothing_that_opens_a_window_or_an_engine_unmasks_sigpipe() {
+        for command in [None, Some("study"), Some("selftest"), Some("ingest"), Some("import-pgn"), Some("restore")] {
+            assert!(
+                !prints_and_exits(command),
+                "{command:?} would run with SIGPIPE unmasked"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_that_only_prints_stops_quietly_when_the_pager_closes() {
+        for command in [Some("status"), Some("doctor"), Some("progress"), Some("games"), Some("today")] {
+            assert!(prints_and_exits(command), "{command:?} would panic on a closed pipe");
+        }
+    }
 
     /// Every imported game is filed by this date, and the ordering it produces
     /// is what the whole trend rests on. Sites disagree about the separator,
