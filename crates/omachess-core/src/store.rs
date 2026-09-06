@@ -816,20 +816,65 @@ impl Store {
     }
 
     /// A puzzle already solved correctly, drawn at random for re-testing.
-    pub fn solved_for_repeat(&self) -> Result<Option<Puzzle>> {
+    pub fn solved_for_repeat(&self, now: DateTime<Utc>) -> Result<Option<Puzzle>> {
+        // Only puzzles far enough from their last solve to be worth re-timing.
+        //
+        // Repeat mode is called "Repeat & measure" and used to serve any solved
+        // puzzle at random, including one finished ten minutes earlier. That
+        // attempt was recorded and then discarded by the pairing, which counts
+        // nothing closer together than MIN_REPEAT_HOURS — so the mode whose
+        // entire purpose is measurement was handing out work that could not be
+        // measured. Solving it again that soon tests whether you remember the
+        // answer, which is not the question being asked.
+        //
+        // Driven from `attempts` rather than from `puzzles`: there are a few
+        // dozen of the former and four million of the latter, and scanning the
+        // corpus to find them took a third of a second of frozen window every
+        // time a repeat was served.
         Ok(self
             .conn
             .query_row(
                 "SELECT p.id, p.fen, p.moves, p.rating, p.rating_deviation, p.popularity,
                         p.nb_plays, p.themes, p.game_url, p.opening_tags
                  FROM puzzles p
-                 WHERE EXISTS (SELECT 1 FROM attempts a
-                               WHERE a.puzzle_id = p.id AND a.correct = 1)
-                 ORDER BY RANDOM() LIMIT 1",
-                [],
+                 WHERE p.id = (
+                     SELECT a.puzzle_id FROM attempts a
+                     WHERE a.correct = 1
+                     GROUP BY a.puzzle_id
+                     HAVING (julianday(?1) - julianday(MAX(a.reviewed_at))) * 24.0 >= ?2
+                     ORDER BY RANDOM() LIMIT 1
+                 )",
+                params![now.to_rfc3339(), MIN_REPEAT_HOURS],
                 puzzle_from_row,
             )
             .optional()?)
+    }
+
+    /// Hours since a puzzle was last solved correctly, if it ever was.
+    pub fn hours_since_solved(&self, puzzle_id: &str, now: DateTime<Utc>) -> Result<Option<f64>> {
+        Ok(self.conn.query_row(
+            "SELECT (julianday(?2) - julianday(MAX(reviewed_at))) * 24.0
+             FROM attempts WHERE puzzle_id = ?1 AND correct = 1",
+            params![puzzle_id, now.to_rfc3339()],
+            |r| r.get::<_, Option<f64>>(0),
+        )?)
+    }
+
+    /// Hours until the soonest solved puzzle is far enough away to be re-timed.
+    ///
+    /// `None` when there is nothing solved at all, or when something is already
+    /// eligible. Without this the trainer can only say "nothing to solve",
+    /// which in Repeat mode is both wrong and useless: there is plenty solved,
+    /// it is simply too soon for any of it to mean anything.
+    pub fn hours_until_repeat(&self, now: DateTime<Utc>) -> Result<Option<f64>> {
+        Ok(self.conn.query_row(
+            "SELECT MIN(?2 - (julianday(?1) - julianday(last)) * 24.0)
+             FROM (SELECT puzzle_id, MAX(reviewed_at) AS last
+                   FROM attempts WHERE correct = 1 GROUP BY puzzle_id)
+             WHERE (julianday(?1) - julianday(last)) * 24.0 < ?2",
+            params![now.to_rfc3339(), MIN_REPEAT_HOURS],
+            |r| r.get::<_, Option<f64>>(0),
+        )?)
     }
 
     /// How many distinct puzzles have been solved correctly at least once.
@@ -1861,7 +1906,110 @@ mod tests {
         assert_eq!(store.overall_success().unwrap(), 0.0);
         assert!(store.setting("player_name").unwrap().is_none());
         assert!(store.unseen_near_rating(1200, None).unwrap().is_none());
-        assert!(store.solved_for_repeat().unwrap().is_none());
+        assert!(store.solved_for_repeat(Utc::now()).unwrap().is_none());
+        assert!(store.hours_until_repeat(Utc::now()).unwrap().is_none());
+    }
+
+    /// Repeat mode is called "Repeat & measure". It used to serve any solved
+    /// puzzle at random, including one finished minutes earlier — and the
+    /// pairing then threw that attempt away, because nothing closer together
+    /// than MIN_REPEAT_HOURS counts. The mode that exists to measure was
+    /// handing out work that could not be measured, and nothing said so.
+    #[test]
+    fn a_repeat_is_never_served_sooner_than_it_could_be_measured() {
+        use crate::ingest::ingest_csv;
+        use chrono::Duration;
+
+        let csv = "PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate\nrep00001,6k1/5ppp/8/8/8/8/5PPP/1R4K1 b - - 0 1,g8h8 b1b8,1150,75,90,100,mateIn1,https://x,,\n";
+        let mut store = Store::in_memory().expect("a store");
+        ingest_csv(&mut store, csv.as_bytes(), 1100).expect("ingest");
+
+        assert!(
+            store.puzzle("rep00001").expect("lookup").is_some(),
+            "the puzzle was never ingested, so nothing below tests anything"
+        );
+
+        let solved_at = Utc::now();
+        store
+            .record_attempt(&AttemptRecord {
+                puzzle_id: "rep00001".to_owned(),
+                reviewed_at: solved_at,
+                elapsed: Duration::seconds(4),
+                correct: true,
+                grade: Rating::Good,
+                puzzle_rating: 1150,
+                session_id: None,
+                index_in_session: 0,
+            })
+            .expect("record");
+
+        // An hour later it is still far too soon to mean anything.
+        let soon = solved_at + Duration::hours(1);
+        assert!(
+            store.solved_for_repeat(soon).expect("query").is_none(),
+            "a puzzle solved an hour ago was offered as a measured repeat"
+        );
+        let wait = store.hours_until_repeat(soon).expect("query");
+        assert!(
+            wait.is_some_and(|h| (h - (MIN_REPEAT_HOURS - 1.0)).abs() < 0.5),
+            "the wait until the first measurable repeat was {wait:?}"
+        );
+
+        // Past the threshold it is exactly what the mode is for.
+        let later = solved_at + Duration::hours(MIN_REPEAT_HOURS as i64 + 1);
+        assert_eq!(
+            store
+                .solved_for_repeat(later)
+                .expect("query")
+                .map(|p| p.id)
+                .as_deref(),
+            Some("rep00001"),
+            "a puzzle past the threshold was not offered"
+        );
+        assert_eq!(
+            store.hours_until_repeat(later).expect("query"),
+            None,
+            "something already eligible was reported as a wait"
+        );
+    }
+
+    /// Four million puzzles scanned to find a few dozen solved ones, once per
+    /// repeat served. The loop order is the defect and it shows in an empty
+    /// database, where a timing test would need the whole corpus.
+    #[test]
+    fn a_repeat_is_found_through_the_attempts_not_the_whole_corpus() {
+        let store = Store::in_memory().expect("a store");
+        let mut stmt = store
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT p.id FROM puzzles p
+                 WHERE p.id = (
+                     SELECT a.puzzle_id FROM attempts a
+                     WHERE a.correct = 1
+                     GROUP BY a.puzzle_id
+                     HAVING (julianday(?1) - julianday(MAX(a.reviewed_at))) * 24.0 >= ?2
+                     ORDER BY RANDOM() LIMIT 1
+                 )",
+            )
+            .expect("a plan");
+        let steps: Vec<String> = stmt
+            .query_map(params![Utc::now().to_rfc3339(), MIN_REPEAT_HOURS], |row| {
+                row.get::<_, String>(3)
+            })
+            .expect("rows")
+            .collect::<Result<_, _>>()
+            .expect("plan rows");
+        assert!(
+            steps.iter().any(|step| step.contains("SEARCH p")),
+            "the puzzle is not fetched by its key: {steps:?}"
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|step| step.starts_with("SCAN p") || step.contains("SCAN p ")),
+            "the corpus is scanned to find a repeat: {steps:?}"
+        );
     }
 
     /// Settings are the one place the application stores loose state, and a

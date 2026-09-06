@@ -6,7 +6,7 @@ use rs_fsrs::{Card, Rating, FSRS};
 
 use crate::grade::{band, baseline_from, grade, next_rating, seed_baseline, speed, Speed};
 use crate::puzzle::Puzzle;
-use crate::store::{AttemptRecord, Store};
+use crate::store::{AttemptRecord, Store, MIN_REPEAT_HOURS};
 
 /// How many recent solves inform a band's baseline.
 pub const BASELINE_WINDOW: u32 = 20;
@@ -145,11 +145,20 @@ impl Session {
     pub fn next_puzzle(&self, store: &Store, now: DateTime<Utc>) -> Result<Option<Puzzle>> {
         if store.repeat_mode()? {
             // Spaced repetition decides which of the solved puzzles is ripe;
-            // anything already solved will do once nothing is due.
+            // anything solved long enough ago will do once nothing is due.
+            //
+            // The due puzzle is checked against the same clock as the fallback.
+            // FSRS can schedule a failed card minutes away, which is right for
+            // memorising and wrong for this: a repeat closer together than
+            // MIN_REPEAT_HOURS is thrown away by the pairing, so serving one in
+            // the mode called "Repeat & measure" spends the solver's time on
+            // something that cannot count.
             if let Some(puzzle) = store.due_puzzles(now, 1)?.into_iter().next() {
-                return Ok(Some(puzzle));
+                if store.hours_since_solved(&puzzle.id, now)? >= Some(MIN_REPEAT_HOURS) {
+                    return Ok(Some(puzzle));
+                }
             }
-            return store.solved_for_repeat();
+            return store.solved_for_repeat(now);
         }
 
         let target = store.personal_rating()?.round().max(0.0) as u32;

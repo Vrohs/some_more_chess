@@ -903,6 +903,16 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         });
     }
 
+    // Train, Repeat and Progress are the application: solve puzzles at rising
+    // difficulty, re-solve them later, find out whether you got faster. The
+    // other four tabs exist and are tested, but none of them is finished, and a
+    // tab that half-works is worse than a tab that is not there — it is what
+    // makes the whole thing feel broken. They come back one at a time, each to
+    // the same bar as this path. `OMACHESS_ALL_TABS=1` shows them meanwhile.
+    // A PGN named on the command line is a request for the Study tab, so that
+    // one argument brings it back on its own rather than failing silently.
+    let everything = std::env::var_os("OMACHESS_ALL_TABS").is_some() || study_file.is_some();
+
     let stack = adw::ViewStack::new();
     stack.add_titled_with_icon(
         trainer.widget(),
@@ -910,30 +920,32 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         "Train",
         "applications-games-symbolic",
     );
-    stack.add_titled_with_icon(
-        play.widget(),
-        Some("play"),
-        "Play",
-        "media-playback-start-symbolic",
-    );
-    stack.add_titled_with_icon(
-        drills.widget(),
-        Some("drill"),
-        "Drill",
-        "media-playlist-repeat-symbolic",
-    );
-    stack.add_titled_with_icon(
-        endgames.widget(),
-        Some("endgames"),
-        "Endgames",
-        "view-grid-symbolic",
-    );
-    stack.add_titled_with_icon(
-        study.widget(),
-        Some("study"),
-        "Study",
-        "accessories-text-editor-symbolic",
-    );
+    if everything {
+        stack.add_titled_with_icon(
+            play.widget(),
+            Some("play"),
+            "Play",
+            "media-playback-start-symbolic",
+        );
+        stack.add_titled_with_icon(
+            drills.widget(),
+            Some("drill"),
+            "Drill",
+            "media-playlist-repeat-symbolic",
+        );
+        stack.add_titled_with_icon(
+            endgames.widget(),
+            Some("endgames"),
+            "Endgames",
+            "view-grid-symbolic",
+        );
+        stack.add_titled_with_icon(
+            study.widget(),
+            Some("study"),
+            "Study",
+            "accessories-text-editor-symbolic",
+        );
+    }
     stack.add_titled_with_icon(
         &progress_page,
         Some("progress"),

@@ -392,8 +392,28 @@ impl Trainer {
                 Err(e) => self.status.set_label(&format!("Skipping bad puzzle: {e}")),
             },
             Ok(None) => {
-                self.status
-                    .set_label("Nothing to solve. Load the puzzle database, or come back when reviews are due.");
+                // In Repeat mode "nothing to solve" is both wrong and useless:
+                // there is plenty solved, it is simply too soon for any of it to
+                // measure anything. Saying when to come back is the difference
+                // between a broken tab and a schedule.
+                let waiting = if self.repeat_mode() {
+                    self.store
+                        .borrow()
+                        .hours_until_repeat(Utc::now())
+                        .unwrap_or(None)
+                } else {
+                    None
+                };
+                self.status.set_label(&match waiting {
+                    Some(hours) => format!(
+                        "Nothing far enough back to re-time yet — the first is ready in {}. \
+                         Turn Repeat off to keep learning new puzzles meanwhile.",
+                        describe_wait(hours)
+                    ),
+                    None => "Nothing to solve. Load the puzzle database, or come back when \
+                             reviews are due."
+                        .to_owned(),
+                });
                 *self.current.borrow_mut() = None;
             }
             Err(e) => {
@@ -872,6 +892,17 @@ fn mate_square(position: &impl Position) -> Option<Square> {
         .flatten()
 }
 
+/// A wait in the units a person would use for it.
+fn describe_wait(hours: f64) -> String {
+    let hours = hours.max(0.0);
+    if hours < 1.0 {
+        let minutes = (hours * 60.0).ceil().max(1.0) as i64;
+        return format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" });
+    }
+    let whole = hours.round() as i64;
+    format!("{whole} hour{}", if whole == 1 { "" } else { "s" })
+}
+
 fn check_square(position: &impl Position) -> Option<Square> {
     position
         .is_check()
@@ -910,6 +941,19 @@ mod tests {
 
     /// The twenty-hour rule is the project's central guard, so the boundary it
     /// is described at must not drift into reading as minutes.
+    /// The wait is the whole message, so it has to read like something a
+    /// person would say rather than a float.
+    #[test]
+    fn a_wait_is_stated_the_way_it_would_be_spoken() {
+        assert_eq!(describe_wait(0.0), "1 minute");
+        assert_eq!(describe_wait(0.25), "15 minutes");
+        assert_eq!(describe_wait(1.0), "1 hour");
+        assert_eq!(describe_wait(19.4), "19 hours");
+        // A negative wait means it is already ready, and must never be spoken
+        // as one.
+        assert_eq!(describe_wait(-3.0), "1 minute");
+    }
+
     #[test]
     fn the_repeat_threshold_reads_in_hours() {
         use chrono::Duration;
