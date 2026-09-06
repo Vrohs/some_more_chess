@@ -213,6 +213,60 @@ pub fn default_path() -> PathBuf {
     crate::paths::cache_dir().join("diagnostics.jsonl")
 }
 
+/// Where the marker for the session now running is kept.
+///
+/// Deliberately not the fault log and deliberately not the database: this has
+/// to survive the process being killed outright, which is the case it exists
+/// for.
+fn session_marker() -> PathBuf {
+    crate::paths::cache_dir().join("session.open")
+}
+
+/// Note that a window has opened, and report whether the last one ever closed.
+///
+/// A window killed by a signal writes nothing: no panic to catch, no unwinding,
+/// no core dump for a signal whose default action is to terminate rather than
+/// dump. That has happened here, and it cost an entire afternoon of looking at
+/// an empty fault log while the application was quietly dying. A file written
+/// on the way in and removed on the way out cannot miss it: if the marker is
+/// still there at the next start, the last window did not close, whatever it
+/// was that stopped it.
+///
+/// Returns whether the previous session ended without closing.
+pub fn session_began() -> bool {
+    session_began_in(&session_marker(), &default_path())
+}
+
+fn session_began_in(marker: &std::path::Path, log: &std::path::Path) -> bool {
+    let orphaned = std::fs::read_to_string(marker).ok();
+    if let Some(previous) = &orphaned {
+        append(
+            log,
+            &Record {
+                at: Utc::now(),
+                fault: Fault::Panic,
+                site: "session".to_owned(),
+                message: format!(
+                    "the window that opened at {} never closed — it was stopped \
+                     by something that left no other trace",
+                    previous.trim()
+                ),
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+            },
+        );
+    }
+    if let Some(dir) = marker.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(marker, Utc::now().to_rfc3339());
+    orphaned.is_some()
+}
+
+/// Note that the window closed the way it was supposed to.
+pub fn session_ended() {
+    let _ = std::fs::remove_file(session_marker());
+}
+
 /// Record a fault that the application recovered from.
 pub fn record_error(site: &str, message: impl std::fmt::Display) {
     append(
@@ -308,6 +362,40 @@ mod tests {
     /// The fault log's whole value is that everything in it is worth reading.
     /// A closed pipe is not, and it arrived here three times in one afternoon
     /// from nothing worse than `omachess doctor | head`.
+    /// A window killed outright writes nothing at all. The marker is the only
+    /// thing that notices, so it has to notice: leave one behind and the next
+    /// start must say so.
+    ///
+    /// Against temporary paths, never the real ones. A test that appends to the
+    /// log a person reads to find out what went wrong is itself a thing that
+    /// went wrong, and this one did exactly that on its first run.
+    #[test]
+    fn a_window_that_never_closed_is_reported_at_the_next_start() {
+        let dir = std::env::temp_dir().join(format!("omachess-session-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let marker = dir.join("session.open");
+        let log = dir.join("diagnostics.jsonl");
+
+        assert!(
+            !session_began_in(&marker, &log),
+            "a first start reported a previous crash"
+        );
+        assert!(marker.exists(), "no marker was left for this run");
+
+        // Killed: nothing removed the marker, so the next start finds it.
+        assert!(
+            session_began_in(&marker, &log),
+            "an orphaned marker went unnoticed"
+        );
+        let written = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            written.contains("never closed"),
+            "nothing was written about a window that did not close: {written:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_closed_pipe_is_not_a_fault() {
         assert!(is_broken_pipe(

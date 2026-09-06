@@ -784,7 +784,12 @@ fn run_app(study: Option<PathBuf>) -> anyhow::Result<()> {
             eprintln!("omachess: {e:#}");
         }
     });
+    // Written before the loop starts and removed after it ends, so a window
+    // stopped by anything at all — a signal, the compositor, a kill — is
+    // visible at the next start even though it wrote nothing itself.
+    omachess_core::diagnostics::session_began();
     app.run_with_args::<&str>(&[]);
+    omachess_core::diagnostics::session_ended();
     Ok(())
 }
 
