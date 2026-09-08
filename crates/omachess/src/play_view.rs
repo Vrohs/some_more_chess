@@ -16,7 +16,6 @@ use gtk4::{
     glib, Align, AspectFrame, Box as GtkBox, Button, DropDown, Label, ListBox, Orientation,
     PolicyType, ScrolledWindow, SelectionMode,
 };
-use omachess_core::drill::{Drill, Offer};
 use omachess_core::engine::MIN_LIMITED_ELO;
 use omachess_core::game::{material_balance, whose_turn, Turn};
 use omachess_core::game::{Game, Verdict};
@@ -35,6 +34,9 @@ use crate::pieces::PieceSet;
 
 /// How often replies from the engine thread are collected.
 const POLL_MS: u32 = 80;
+
+/// Told which position to practise, once a game has produced one.
+type PractiseHandler = Box<dyn Fn(&str)>;
 
 pub struct PlayView {
     root: GtkBox,
@@ -77,11 +79,16 @@ pub struct PlayView {
     pressured: RefCell<Vec<bool>>,
     /// The finished game's analysis, awaiting the player's decision.
     report: RefCell<Option<GameAnalysis>>,
-    /// The position where the game turned, offered back as practice.
-    drill: RefCell<Option<Drill>>,
     drill_button: Button,
     add_button: Button,
     plan_box: GtkBox,
+    /// Where to send the player when they ask to practise a position. The Play
+    /// tab used to run its own copy of the exercise, which recorded nothing at
+    /// all; there is one exercise now and it lives in the Drill tab.
+    practise: RefCell<Option<PractiseHandler>>,
+    /// The row the game just finished was filed under, so a position taken out
+    /// of it can point back at the moves that led there.
+    last_game: Cell<Option<i64>>,
     /// The figures a finished game produced: tiles, phase bars, the clock.
     report_box: GtkBox,
     thinking: Cell<bool>,
@@ -295,11 +302,12 @@ impl PlayView {
             clock_mine,
             pressured: RefCell::new(Vec::new()),
             report: RefCell::new(None),
-            drill: RefCell::new(None),
             drill_button,
             add_button,
             plan_box,
             report_box,
+            practise: RefCell::new(None),
+            last_game: Cell::new(None),
             thinking: Cell::new(false),
         });
 
@@ -334,7 +342,7 @@ impl PlayView {
         let weak: Weak<Self> = Rc::downgrade(&view);
         view.drill_button.connect_clicked(move |_| {
             if let Some(view) = weak.upgrade() {
-                view.start_drill();
+                view.hand_over_to_drill();
             }
         });
 
@@ -440,6 +448,11 @@ impl PlayView {
     /// Whether the thing to do after a game is on screen. Checked rather than
     /// assumed: it was hidden for a game with two blunders in it, while the
     /// report beside it said there were two.
+    /// Press "practise the moment it turned", as the button does.
+    pub(crate) fn press_practise(self: &Rc<Self>) {
+        self.hand_over_to_drill();
+    }
+
     pub(crate) fn practise_offered(&self) -> bool {
         self.drill_button.is_visible()
     }
@@ -713,7 +726,6 @@ impl PlayView {
         *self.report.borrow_mut() = None;
         self.add_button.set_visible(false);
         self.board.set_mate(None);
-        *self.drill.borrow_mut() = None;
         self.drill_button.set_visible(false);
         self.opening.set_label("");
         *self.game.borrow_mut() = Some(game);
@@ -752,17 +764,6 @@ impl PlayView {
     }
 
     fn on_square(self: &Rc<Self>, square: Square) {
-        if self.drilling() {
-            let Some(from) = self.board.selected() else {
-                self.board.select(Some(square));
-                return;
-            };
-            self.board.select(None);
-            if from != square {
-                self.drill_move(from, square);
-            }
-            return;
-        }
         if !self.player_may_move() {
             return;
         }
@@ -785,11 +786,6 @@ impl PlayView {
     }
 
     fn on_drag(self: &Rc<Self>, from: Square, to: Square) {
-        if self.drilling() {
-            self.board.select(None);
-            self.drill_move(from, to);
-            return;
-        }
         if !self.player_may_move() || !self.has_own_piece(from) {
             trace(&format!(
                 "no move offered from {from:?}: not your turn or not your piece"
@@ -804,14 +800,7 @@ impl PlayView {
     }
 
     /// True while the post-game exercise is waiting for an answer.
-    fn drilling(&self) -> bool {
-        self.drill
-            .borrow()
-            .as_ref()
-            .is_some_and(|drill| !drill.is_solved())
-    }
-
-    fn player_may_move(&self) -> bool {
+     fn player_may_move(&self) -> bool {
         !self.thinking.get()
             && self
                 .game
@@ -1299,119 +1288,12 @@ impl PlayView {
 
     /// Put the player back in the position where the game turned.
     /// Put the player back in the position where the game turned.
-    fn start_drill(self: &Rc<Self>) {
-        let Some((drill, ply, lost)) = ({
-            let report = self.report.borrow();
-            report
-                .as_ref()
-                .and_then(GameAnalysis::critical_moment)
-                .and_then(|m| Drill::from_analysis(m).map(|d| (d, m.ply, m.lost())))
-        }) else {
-            return;
-        };
-
-        self.board.set_orientation(drill.position().turn());
-        self.board.set_position(drill.position());
-        self.board.set_mate(None);
-        self.board.set_last_move(None);
-        self.board.select(None);
-
-        self.status.set_label("Find the move.");
-        self.detail.set_label(&format!(
-            "Move {}   -{:.0}%   the game turned here",
-            ply / 2 + 1,
-            lost * 100.0
-        ));
-        self.drill_button.set_visible(false);
-        *self.drill.borrow_mut() = Some(drill);
-    }
-
-    /// Judge a move offered during the drill.
+     /// Judge a move offered during the drill.
     /// Judge a move offered during the exercise.
     /// Judge a move offered during the exercise and walk the line forward.
-    fn drill_move(self: &Rc<Self>, from: Square, to: Square) {
-        let outcome = match self.drill.borrow_mut().as_mut() {
-            Some(drill) => drill.offer(from, to),
-            None => return,
-        };
-
-        match outcome {
-            // A misdrag is not an answer, so it costs nothing.
-            Offer::Illegal => {}
-            Offer::Correct { reply, finished } => {
-                self.show_drill_position(reply.as_deref());
-                self.status.set_label(if finished {
-                    "That is the whole line."
-                } else {
-                    "Right. Now find the next one."
-                });
-                self.describe_drill(finished, None);
-            }
-            Offer::Wrong { revealed: None, .. } => {
-                self.status.set_label("Not that one. Look again.");
-                crate::announce::say(crate::announce::Tone::Rejected, "Not that one. Look again.");
-            }
-            Offer::Wrong {
-                revealed: Some(answer),
-                reply,
-                finished,
-            } => {
-                self.show_drill_position(reply.as_deref());
-                self.status.set_label(if finished {
-                    "That was the line."
-                } else {
-                    "Shown — keep going from here."
-                });
-                self.describe_drill(finished, Some(&answer));
-            }
-        }
-    }
-
-    /// Redraw the exercise position after the line has moved on.
-    fn show_drill_position(&self, reply: Option<&str>) {
-        let Some(position) = self.drill.borrow().as_ref().map(|d| d.position().clone()) else {
-            return;
-        };
-        self.board.set_position(&position);
-        self.board.select(None);
-        // Highlight the answer that was played, so it is not missed.
-        if let Some(reply) = reply.and_then(|uci| uci.parse::<shakmaty::uci::UciMove>().ok()) {
-            if let (Some(from), Some(to)) = (reply.from(), reply.to()) {
-                self.board.set_last_move(Some((from, to)));
-            }
-        }
-        self.board.set_check(
-            position
-                .is_check()
-                .then(|| position.board().king_of(position.turn()))
-                .flatten(),
-        );
-    }
-
-    /// Say where the solver is in the line, and what was just shown.
-    fn describe_drill(&self, finished: bool, revealed: Option<&str>) {
-        let progress = self
-            .drill
-            .borrow()
-            .as_ref()
-            .map(omachess_core::drill::Drill::progress);
-        let mut text = String::new();
-        if let Some(answer) = revealed {
-            text.push_str(&format!("The move was {answer}. "));
-        }
-        match (finished, progress) {
-            (true, _) => text.push_str(
-                "Add it to training to see it again.",
-            ),
-            (false, Some((done, total))) => {
-                text.push_str(&format!("Move {} of {total} in the line.", done + 1))
-            }
-            (false, None) => {}
-        }
-        self.detail.set_label(&text);
-    }
-
-    /// Play the engine's line so the player sees what the move was for.
+     /// Redraw the exercise position after the line has moved on.
+     /// Say where the solver is in the line, and what was just shown.
+     /// Play the engine's line so the player sees what the move was for.
     /// Play out the line so the player sees what the move was for.
     /// Store how well the game was played, so quality can be tracked over time
     /// independently of how many were won.
@@ -1497,8 +1379,9 @@ impl PlayView {
             let store = self.store.borrow();
             // A game that cannot be filed is a game you played and lost the
             // record of, so the failure is written down rather than shrugged at.
-            if let Err(e) = store.record_game(&record) {
-                omachess_core::diagnostics::record_error("play::record_game", e);
+            match store.record_game(&record) {
+                Ok(id) => self.last_game.set(Some(id)),
+                Err(e) => omachess_core::diagnostics::record_error("play::record_game", e),
             }
             // Playing strength follows results against the engine, not puzzles.
             if let Ok(current) = store.play_rating() {
@@ -1571,6 +1454,71 @@ impl PlayView {
             self.review_list.append(&row);
         }
         self.review_scroll.set_visible(true);
+    }
+
+    /// Called with the puzzle id when the player asks to practise a position.
+    pub fn connect_practise(&self, handler: impl Fn(&str) + 'static) {
+        *self.practise.borrow_mut() = Some(Box::new(handler));
+    }
+
+    /// Send the moment the game turned to the Drill tab.
+    ///
+    /// It is written to the store on the way, so the position exists as
+    /// something to practise rather than only as a report line. This is the
+    /// half the in-Play exercise never did: it posed the position, graded the
+    /// answer, and left no trace anywhere.
+    fn hand_over_to_drill(self: &Rc<Self>) {
+        let moment = {
+            let report = self.report.borrow();
+            report
+                .as_ref()
+                .and_then(GameAnalysis::critical_moment)
+                .cloned()
+        };
+        let Some(moment) = moment else {
+            return;
+        };
+        let id = stable_puzzle_id(&moment);
+        let rating = self
+            .store
+            .borrow()
+            .personal_rating()
+            .unwrap_or(f64::from(MIN_LIMITED_ELO))
+            .round()
+            .max(0.0) as u32;
+
+        {
+            let mut store = self.store.borrow_mut();
+            if let Err(e) = store.insert_puzzles(&[puzzle_from(&moment, rating, &id)]) {
+                omachess_core::diagnostics::record_error("play::hand_over", e);
+                return;
+            }
+        }
+        {
+            let store = self.store.borrow();
+            if let Err(e) = store.record_drill_origin(
+                &id,
+                &DrillOrigin {
+                    source: String::new(),
+                    played_at: chrono::Utc::now(),
+                    ply: moment.ply as u32,
+                    played: describe_move(&moment, &moment.played),
+                    best: describe_move(&moment, &moment.best),
+                    lost: moment.lost(),
+                    phase: moment.phase.theme().to_owned(),
+                    win_before: moment.win_before,
+                    best_line: moment.best_line.clone(),
+                    game_id: self.last_game.get(),
+                },
+            ) {
+                omachess_core::diagnostics::record_error("play::hand_over", e);
+                return;
+            }
+        }
+
+        if let Some(handler) = self.practise.borrow().as_ref() {
+            handler(&id);
+        }
     }
 
     /// Put a reviewed position on the board so it can be looked at.

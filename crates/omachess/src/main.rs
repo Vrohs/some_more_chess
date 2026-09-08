@@ -982,6 +982,17 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         });
     }
 
+    // The Play tab hands the moment a game turned to the Drill tab, which is
+    // where the one exercise lives. Play used to run its own copy of it.
+    {
+        let stack = stack.clone();
+        let drills = drills.clone();
+        play.connect_practise(move |puzzle_id| {
+            drills.focus(puzzle_id);
+            stack.set_visible_child_name("drill");
+        });
+    }
+
     let title = adw::WindowTitle::new("OMACHESS", &trainer.summary());
     let switcher = adw::ViewSwitcher::builder()
         .stack(&stack)

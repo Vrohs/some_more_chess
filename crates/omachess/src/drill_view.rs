@@ -306,6 +306,26 @@ impl DrillView {
     }
 
     /// Enough of the internal state to say where a click went wrong.
+    /// Open on a particular position, reloading if it is not on the list yet.
+    ///
+    /// Used by the Play tab when the player asks to practise the moment their
+    /// game turned: the position was written to the store on the way here, so
+    /// a reload will find it.
+    pub(crate) fn focus(&self, puzzle_id: &str) {
+        if !self.positions.borrow().iter().any(|(id, _, _)| id == puzzle_id) {
+            self.reload();
+        }
+        let found = self
+            .positions
+            .borrow()
+            .iter()
+            .position(|(id, _, _)| id == puzzle_id);
+        if let Some(index) = found {
+            self.picker.set_selected(index as u32);
+            self.describe(index);
+        }
+    }
+
     pub(crate) fn status_text(&self) -> String {
         self.status.text().to_string()
     }

@@ -887,6 +887,88 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         )
     }));
 
+    // The Play tab used to run its own copy of the exercise, and that copy
+    // wrote nothing to the store: no attempt, no move log, no session. You
+    // could work through the position where your game turned and the
+    // application would afterwards have no idea you had ever seen it. There is
+    // one exercise now, in the Drill tab, and the button hands the position to
+    // it — writing it down on the way, or there would be nothing to hand.
+    checks.push(check("practising a game's mistake reaches the drill queue", || {
+        let engine = omachess_core::engine::find_engine();
+        expect(engine.is_some(), "no engine on PATH, so no game to review")?;
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let play = PlayView::new(store.clone(), pieces.clone(), engine);
+
+        let landed: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let record = landed.clone();
+        play.connect_practise(move |id| *record.borrow_mut() = Some(id.to_owned()));
+
+        // The king walks out. 1.f3 and 2.g4 depend on Black finding the mate,
+        // and a capped engine does not always, which made this flaky; a king on
+        // h4 by move four is a catastrophe against any reply at all.
+        play.begin_game();
+        for (from, to) in [
+            (Square::F2, Square::F3),
+            (Square::E1, Square::F2),
+            (Square::F2, Square::G3),
+            (Square::G3, Square::H4),
+        ] {
+            let before = play.moves_played();
+            play.board().drag(from, to);
+            pump(30, || play.moves_played() >= before + 2);
+        }
+        play.give_up();
+        expect(
+            pump(120, || {
+                play.panel_labels().iter().any(|t| t.contains("Accuracy"))
+            }),
+            "the report never arrived, so there was nothing to hand over",
+        )?;
+        expect(
+            play.flagged_moves() > 0,
+            &format!(
+                "the review flagged nothing after walking the king to h4, so \
+                 this check cannot say anything. {}",
+                play.describe_state()
+            ),
+        )?;
+
+        let before = store
+            .borrow()
+            .drills_to_play(50)
+            .map_err(|e| e.to_string())?
+            .len();
+        play.press_practise();
+
+        let id = landed
+            .borrow()
+            .clone()
+            .ok_or("pressing practise sent nothing to the drill tab")?;
+        let after = store
+            .borrow()
+            .drills_to_play(50)
+            .map_err(|e| e.to_string())?;
+        expect(
+            after.len() > before,
+            "practising a position left no trace in the queue, which is the \
+             whole reason the Play tab stopped keeping its own copy",
+        )?;
+        expect(
+            after.iter().any(|(queued, _)| *queued == id),
+            &format!("the position handed over is not the one queued: {id}"),
+        )?;
+        // And it carries what the exercise needs to say anything.
+        let origin = store
+            .borrow()
+            .drill_origin(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or("the handed-over position has no record of what was played")?;
+        expect(
+            !origin.played.is_empty() && !origin.best.is_empty(),
+            "the position was queued without the move that was played",
+        )
+    }));
+
     // --- the exercise, which is the point of the tab ----------------------
     //
     // It used to open on "Play it out against the engine. What you played last
