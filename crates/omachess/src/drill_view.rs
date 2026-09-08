@@ -33,6 +33,21 @@ use crate::pieces::PieceSet;
 const DEFENCE_MS: u64 = 700;
 const POLL_MS: u32 = 80;
 
+/// What the exercise is asking for right now.
+///
+/// It used to ask for only one thing — play the position out — and told the
+/// solver nothing about it first: "Play it out against the engine. What you
+/// played last time comes after." Walking in blind is a fine way to test
+/// somebody and a poor way to teach them, and it is not what going back over
+/// your own game is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// What you played, what it cost, and what should have been played.
+    Find,
+    /// Now convert the position you just found.
+    PlayOut,
+}
+
 pub struct DrillView {
     root: GtkBox,
     board: Rc<BoardView>,
@@ -57,6 +72,22 @@ pub struct DrillView {
     sitting: Cell<Option<i64>>,
     /// When the move being considered began.
     move_started: Cell<Option<std::time::Instant>>,
+    /// Which half of the exercise is running.
+    stage: Cell<Stage>,
+    /// Wrong answers to the "find it" question, before the answer is given.
+    misses: Cell<u32>,
+    /// Why the last attempt was wrong, once the engine has said.
+    lesson: Label,
+    /// The engine's line, and where in it the reader is.
+    line: RefCell<Vec<String>>,
+    line_at: Cell<usize>,
+    prev: Button,
+    next: Button,
+    /// One question outstanding, and answers for a position already left
+    /// behind are dropped rather than shown against the wrong board.
+    lesson_busy: Cell<bool>,
+    lesson_token: Cell<u64>,
+    asked_about: RefCell<Option<(shakmaty::Chess, String)>>,
 }
 
 impl DrillView {
@@ -98,6 +129,26 @@ impl DrillView {
         let countdown = Label::builder().halign(Align::Start).build();
         countdown.add_css_class("dim-label");
 
+        // Why the last attempt was wrong, in the engine's words. The tab used
+        // to answer a wrong move with nothing at all.
+        let lesson = Label::builder()
+            .halign(Align::Start)
+            .wrap(true)
+            .max_width_chars(38)
+            .build();
+        lesson.add_css_class("omachess-lesson");
+
+        // Stepping the engine's line once it is on the table.
+        let prev = Button::with_label("‹ Back");
+        let next = Button::with_label("Next ›");
+        let steps = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(6)
+            .build();
+        steps.append(&prev);
+        steps.append(&next);
+        steps.set_visible(false);
+
         let start = Button::with_label("Begin");
         start.add_css_class("suggested-action");
 
@@ -122,6 +173,8 @@ impl DrillView {
         panel.append(&title);
         panel.append(&objective);
         panel.append(&idea);
+        panel.append(&lesson);
+        panel.append(&steps);
         panel.append(&controls);
         panel.append(&status);
         panel.append(&countdown);
@@ -162,6 +215,16 @@ impl DrillView {
             settled: Cell::new(true),
             sitting: Cell::new(None),
             move_started: Cell::new(None),
+            stage: Cell::new(Stage::Find),
+            misses: Cell::new(0),
+            lesson,
+            line: RefCell::new(Vec::new()),
+            line_at: Cell::new(0),
+            prev,
+            next,
+            lesson_busy: Cell::new(false),
+            lesson_token: Cell::new(0),
+            asked_about: RefCell::new(None),
         });
 
         view.reload();
@@ -174,9 +237,28 @@ impl DrillView {
         });
 
         let weak: Weak<Self> = Rc::downgrade(&view);
+        view.prev.connect_clicked(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.step_line(false);
+            }
+        });
+        let weak: Weak<Self> = Rc::downgrade(&view);
+        view.next.connect_clicked(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.step_line(true);
+            }
+        });
+
+        let weak: Weak<Self> = Rc::downgrade(&view);
         view.start.connect_clicked(move |_| {
             if let Some(view) = weak.upgrade() {
-                view.begin();
+                // One button, two jobs, because they are the two halves of one
+                // exercise: give up on finding it, then convert what you found.
+                if view.stage.get() == Stage::Find {
+                    view.reveal_answer();
+                } else {
+                    view.begin();
+                }
             }
         });
 
@@ -224,6 +306,22 @@ impl DrillView {
     }
 
     /// Enough of the internal state to say where a click went wrong.
+    pub(crate) fn status_text(&self) -> String {
+        self.status.text().to_string()
+    }
+
+    pub(crate) fn brief_text(&self) -> String {
+        self.objective.text().to_string()
+    }
+
+    pub(crate) fn asked_text(&self) -> String {
+        self.idea.text().to_string()
+    }
+
+    pub(crate) fn lesson_text(&self) -> String {
+        self.lesson.text().to_string()
+    }
+
     pub(crate) fn describe_state(&self) -> String {
         let positions = self.positions.borrow().len();
         let game = self.game.borrow();
@@ -319,23 +417,158 @@ impl DrillView {
             return;
         };
         self.title
-            .set_label(&format!("Your game, move {}", origin.ply / 2 + 1));
-        self.objective
-            .set_label(match playout::objective_for(origin.win_before) {
-                Objective::Win => "You were winning here. Win it.",
-                Objective::Draw => "Save it — a draw is a pass.",
-            });
-        // The brief names the move that was played, so it is withheld until the
-        // position has been played out: the point is to walk in blind.
+            .set_label(&format!("Move {}", origin.ply / 2 + 1));
+        // What you played and what it cost, said first. It used to be withheld
+        // until after the position had been played out, on the reasoning that
+        // the point was to walk in blind — which is a way to test somebody, not
+        // to teach them, and is not what going back over your own game is for.
+        self.objective.set_label(&format!(
+            "{}??   -{:.0}%   you stood at {:.0}%",
+            origin.played,
+            origin.lost * 100.0,
+            origin.win_before.max(0.0) * 100.0
+        ));
         self.idea
-            .set_label("Play it out against the engine. What you played last time comes after.");
+            .set_label(match playout::objective_for(origin.win_before) {
+                Objective::Win => "Winning was there. Find the move.",
+                Objective::Draw => "A draw was there. Find the move.",
+            });
         if let Some(game) = Game::from_fen(self.player_side(&fen), &fen) {
             self.board.set_position(game.position());
             self.board.set_orientation(self.player_side(&fen));
+            *self.game.borrow_mut() = Some(game);
         }
+        self.stage.set(Stage::Find);
+        // The exercise is live as soon as it is on screen: the first half asks
+        // a question, and a question you cannot answer until you press Begin is
+        // not being asked.
+        self.settled.set(false);
+        self.thinking.set(false);
+        self.misses.set(0);
+        self.lesson.set_label("");
+        self.line.borrow_mut().clear();
+        self.steps_visible(false);
+        self.start.set_label("Show me");
         self.status.set_label("");
         self.countdown.set_label("");
         self.show_record();
+    }
+
+    fn steps_visible(&self, on: bool) {
+        if let Some(row) = self.prev.parent() {
+            row.set_visible(on);
+        }
+    }
+
+    /// Judge an answer to "find the move".
+    ///
+    /// Returns whether the move was the one the engine wanted.
+    fn judge_answer(&self, mv: &shakmaty::Move) -> bool {
+        let Some((_, origin, _)) = self.entry() else {
+            return false;
+        };
+        let position = match self.game.borrow().as_ref() {
+            Some(game) => game.position().clone(),
+            None => return false,
+        };
+        let san = shakmaty::san::San::from_move(&position, *mv).to_string();
+        san == origin.best
+    }
+
+    /// Ask the engine what punishes the move just tried.
+    ///
+    /// The same question the trainer asks, for the same reason: "not that one"
+    /// tells the solver they failed and nothing about the board.
+    fn ask_why(&self, mv: &shakmaty::Move) {
+        let Some(worker) = &self.worker else {
+            return;
+        };
+        if self.lesson_busy.get() {
+            return;
+        }
+        let Some(position) = self.game.borrow().as_ref().map(|g| g.position().clone()) else {
+            return;
+        };
+        let played = shakmaty::san::SanPlus::from_move(position.clone(), *mv).to_string();
+        let mut after = position;
+        after.play_unchecked(*mv);
+
+        let token = self.lesson_token.get().wrapping_add(1);
+        self.lesson_token.set(token);
+        *self.asked_about.borrow_mut() = Some((after.clone(), played));
+
+        let fen =
+            shakmaty::fen::Fen::from_position(&after, shakmaty::EnPassantMode::Legal).to_string();
+        if worker.send(Request::Evaluate {
+            fen,
+            moves: Vec::new(),
+            depth: 18,
+            token,
+        }) {
+            self.lesson_busy.set(true);
+            self.lesson.set_label("Looking at why…");
+        }
+    }
+
+    /// Put the answer on the table and let it be walked.
+    fn reveal_answer(&self) {
+        let Some((_, origin, _)) = self.entry() else {
+            return;
+        };
+        let position = match self.game.borrow().as_ref() {
+            Some(game) => game.position().clone(),
+            None => return,
+        };
+        let line = omachess_core::game::line_to_san(&position, &origin.best_line);
+        let shown = if line.is_empty() {
+            origin.best.clone()
+        } else {
+            line.join("  ")
+        };
+        self.lesson
+            .set_label(&format!("{} was the move. {shown}", origin.best));
+        *self.line.borrow_mut() = origin.best_line.clone();
+        self.line_at.set(0);
+        self.steps_visible(!origin.best_line.is_empty());
+        self.stage.set(Stage::PlayOut);
+        self.idea.set_label("Now play it out against the engine.");
+        self.start.set_label("Play it out");
+    }
+
+    /// Step the engine's line on the board.
+    fn step_line(&self, forward: bool) {
+        let Some((_, _, fen)) = self.entry() else {
+            return;
+        };
+        let line = self.line.borrow().clone();
+        if line.is_empty() {
+            return;
+        }
+        let at = self.line_at.get();
+        let at = if forward {
+            (at + 1).min(line.len())
+        } else {
+            at.saturating_sub(1)
+        };
+        self.line_at.set(at);
+        let Some(mut position) = omachess_core::drill::position_after(&fen, "") else {
+            return;
+        };
+        let mut last = None;
+        for uci in line.iter().take(at) {
+            let Ok(parsed) = uci.parse::<shakmaty::uci::UciMove>() else {
+                break;
+            };
+            let Ok(mv) = parsed.to_move(&position) else {
+                break;
+            };
+            last = mv.from().map(|from| (from, mv.to()));
+            position.play_unchecked(mv);
+        }
+        self.board.set_position(&position);
+        self.board.set_last_move(last);
+        self.status
+            .set_label(&format!("Line: move {at} of {}", line.len()));
     }
 
     /// Whichever side is to move in the position is the side the player had.
@@ -399,6 +632,9 @@ impl DrillView {
             }
         }
         crate::announce::clear();
+        // Begin is the second half: from here a move is a move again.
+        self.stage.set(Stage::PlayOut);
+        self.steps_visible(false);
         self.move_started.set(Some(std::time::Instant::now()));
         *self.game.borrow_mut() = Some(game);
         self.settled.set(false);
@@ -499,12 +735,33 @@ impl DrillView {
             )
         });
         let Some(mv) = find_move(game.position(), from, to, prefer.as_deref()) else {
-            crate::announce::say(
-                crate::announce::Tone::Rejected,
-                &format!("{from} to {to} is not a legal move here"),
-            );
+            self.status
+                .set_label(&format!("{from} to {to} is not legal here"));
             return;
         };
+
+        // While the exercise is asking which move should have been played, a
+        // move is an answer rather than a move: it is judged, explained, and
+        // the position stays where it is.
+        if self.stage.get() == Stage::Find {
+            drop(slot);
+            if self.judge_answer(&mv) {
+                self.status.set_label("That is the move.");
+                self.lesson.set_label("");
+                self.reveal_answer();
+            } else {
+                let misses = self.misses.get() + 1;
+                self.misses.set(misses);
+                if misses >= 2 {
+                    self.status.set_label("Here it is.");
+                    self.reveal_answer();
+                } else {
+                    self.status.set_label("Not that one.");
+                    self.ask_why(&mv);
+                }
+            }
+            return;
+        }
         if game.play(&mv).is_err() {
             crate::announce::say(
                 crate::announce::Tone::Rejected,
@@ -654,6 +911,24 @@ impl DrillView {
         while let Some(reply) = worker.poll() {
             match reply {
                 Reply::Move(uci) => self.apply_engine_move(&uci),
+                // Why the attempt was wrong, in the engine's words. The tab
+                // used to answer a wrong move with nothing at all.
+                Reply::Evaluation { analysis, token } => {
+                    self.lesson_busy.set(false);
+                    if token != self.lesson_token.get() {
+                        continue;
+                    }
+                    let asked = self.asked_about.borrow();
+                    let Some((after, played)) = asked.as_ref() else {
+                        continue;
+                    };
+                    match omachess_core::teach::refutation(after, &analysis) {
+                        Some(found) => self.lesson.set_label(&found.describe(played)),
+                        // Nothing usable back means nothing said, rather than
+                        // something confident about a score never given.
+                        None => self.lesson.set_label(""),
+                    }
+                }
                 Reply::Failed(why) => {
                     self.thinking.set(false);
                     self.status.set_label(&format!("The engine stopped: {why}"));

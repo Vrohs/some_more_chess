@@ -380,7 +380,6 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
     }));
 
     checks.push(check("an illegal move is refused in words", || {
-        use crate::announce::{self, Tone};
         let store = Rc::new(RefCell::new(seeded_store()?));
         store
             .borrow()
@@ -403,16 +402,17 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         let drills = DrillView::new(store, pieces.clone(), None);
         drills.reload();
         drills.begin();
-        announce::clear();
 
         // A rook cannot go there.
         drills.board().click(Square::B1);
         drills.board().click(Square::C3);
 
-        let said = announce::last().ok_or("an illegal move was refused silently")?;
+        // Beside the board, where the rest of the exercise speaks, rather than
+        // as a strip across the window.
+        let said = drills.status_text();
         expect(
-            said.0 == Tone::Rejected,
-            &format!("an illegal move was announced as {:?}", said.0),
+            said.to_lowercase().contains("not legal"),
+            &format!("an illegal move was refused silently: {said:?}"),
         )
     }));
 
@@ -883,6 +883,136 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
                 "the review flagged {flagged} moves and the tab offers nothing \
                  to practise. {}",
                 play.describe_state()
+            ),
+        )
+    }));
+
+    // --- the exercise, which is the point of the tab ----------------------
+    //
+    // It used to open on "Play it out against the engine. What you played last
+    // time comes after" — the mistake withheld on the reasoning that walking in
+    // blind is the exercise. It is not: going back over your own game is for
+    // being shown what you did, and a wrong answer got no reply at all.
+    checks.push(check("a drill says what you played before asking anything", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        store
+            .borrow()
+            .record_drill_origin(
+                "selftst1",
+                &DrillOrigin {
+                    source: "https://lichess.org/a".to_owned(),
+                    played_at: chrono::Utc::now(),
+                    ply: 40,
+                    played: "Kh8".to_owned(),
+                    best: "Rb8".to_owned(),
+                    lost: 0.34,
+                    phase: "middlegame".to_owned(),
+                    win_before: 0.82,
+                    best_line: vec!["b1b8".to_owned()],
+                    game_id: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        let drills = DrillView::new(store, pieces.clone(), None);
+        drills.reload();
+
+        let brief = drills.brief_text();
+        expect(
+            brief.contains("Kh8") && brief.contains("34"),
+            &format!("the tab did not say what was played or what it cost: {brief:?}"),
+        )?;
+        expect(
+            drills.asked_text().to_lowercase().contains("find the move"),
+            &format!("the tab did not ask for anything: {:?}", drills.asked_text()),
+        )
+    }));
+
+    checks.push(check("a wrong answer in a drill is explained", || {
+        let engine = omachess_core::engine::find_engine();
+        expect(engine.is_some(), "no engine on PATH, so nothing to explain")?;
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        store
+            .borrow()
+            .record_drill_origin(
+                "selftst1",
+                &DrillOrigin {
+                    source: String::new(),
+                    played_at: chrono::Utc::now(),
+                    ply: 40,
+                    played: "Kh8".to_owned(),
+                    best: "Rb8".to_owned(),
+                    lost: 0.34,
+                    phase: "middlegame".to_owned(),
+                    win_before: 0.82,
+                    best_line: vec!["b1b8".to_owned()],
+                    game_id: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        let drills = DrillView::new(store, pieces.clone(), engine);
+        drills.reload();
+
+        // Legal, and not the answer.
+        drills.board().click(Square::B1);
+        drills.board().click(Square::B4);
+        expect(
+            pump(60, || {
+                let said = drills.lesson_text();
+                !said.is_empty() && said != "Looking at why…"
+            }),
+            &format!(
+                "a wrong answer got no explanation: {:?}. {}",
+                drills.lesson_text(),
+                drills.describe_state()
+            ),
+        )?;
+        expect(
+            drills.lesson_text().starts_with("Rb4"),
+            &format!(
+                "the explanation did not name the move tried: {:?}",
+                drills.lesson_text()
+            ),
+        )
+    }));
+
+    checks.push(check("the right answer in a drill is recognised", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        store
+            .borrow()
+            .record_drill_origin(
+                "selftst1",
+                &DrillOrigin {
+                    source: String::new(),
+                    played_at: chrono::Utc::now(),
+                    ply: 40,
+                    played: "Kh8".to_owned(),
+                    best: "Rb8".to_owned(),
+                    lost: 0.34,
+                    phase: "middlegame".to_owned(),
+                    win_before: 0.82,
+                    best_line: vec!["b1b8".to_owned()],
+                    game_id: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        let drills = DrillView::new(store, pieces.clone(), None);
+        drills.reload();
+
+        drills.board().click(Square::B1);
+        drills.board().click(Square::B8);
+        expect(
+            drills.lesson_text().contains("Rb8"),
+            &format!(
+                "finding the move was not recognised: {:?} / {}",
+                drills.lesson_text(),
+                drills.describe_state()
+            ),
+        )?;
+        expect(
+            drills.asked_text().to_lowercase().contains("play it out"),
+            &format!(
+                "the exercise did not move on to converting it: {:?}",
+                drills.asked_text()
             ),
         )
     }));
