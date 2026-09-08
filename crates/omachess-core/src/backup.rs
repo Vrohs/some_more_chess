@@ -35,6 +35,9 @@ pub struct Backup {
     pub drill_positions: Vec<DrillRow>,
     #[serde(default)]
     pub drill_attempts: Vec<DrillAttemptRow>,
+    /// Absent in backups written before the exercise asked for the move.
+    #[serde(default)]
+    pub drill_answers: Vec<DrillAnswerRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -59,6 +62,14 @@ pub struct DrillRow {
     /// The engine's line, absent in backups written before it was kept.
     #[serde(default)]
     pub best_line: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DrillAnswerRow {
+    pub puzzle_id: String,
+    pub answered_at: DateTime<Utc>,
+    pub found: bool,
+    pub misses: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -192,6 +203,7 @@ pub fn export(store: &Store) -> Result<String> {
         endgames: store.export_endgames()?,
         drill_positions: store.export_drill_positions()?,
         drill_attempts: store.export_drill_attempts()?,
+        drill_answers: store.export_drill_answers()?,
     };
     serde_json::to_string_pretty(&backup).context("serialising the backup")
 }
@@ -267,6 +279,20 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
                 // game it came from is somewhere else, or nowhere.
                 game_id: None,
             },
+        )?;
+        report.drills_written += 1;
+    }
+
+    for answer in &backup.drill_answers {
+        if store.has_drill_answer(answer.answered_at)? {
+            report.drills_skipped += 1;
+            continue;
+        }
+        store.record_drill_answer(
+            &answer.puzzle_id,
+            answer.answered_at,
+            answer.found,
+            answer.misses,
         )?;
         report.drills_written += 1;
     }
@@ -515,6 +541,7 @@ mod tests {
             "endgame_attempts",
             "drill_positions",
             "drill_attempts",
+            "drill_answers",
         ];
 
         let mut tables: Vec<&str> = crate::store::SCHEMA

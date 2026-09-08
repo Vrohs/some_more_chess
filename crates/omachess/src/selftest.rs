@@ -969,6 +969,92 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         )
     }));
 
+    // Finding the move and converting it are different facts about the same
+    // position. Only the second was ever recorded, so seeing the move and
+    // failing to win with it looked identical to grinding out a win from a
+    // position you never understood — and the first is the half this teaches.
+    checks.push(check("whether the move was found is recorded", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        store
+            .borrow()
+            .record_drill_origin(
+                "selftst1",
+                &DrillOrigin {
+                    source: String::new(),
+                    played_at: chrono::Utc::now(),
+                    ply: 40,
+                    played: "Kh8".to_owned(),
+                    best: "Rb8".to_owned(),
+                    lost: 0.34,
+                    phase: "middlegame".to_owned(),
+                    win_before: 0.82,
+                    best_line: vec!["b1b8".to_owned()],
+                    game_id: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        let drills = DrillView::new(store.clone(), pieces.clone(), None);
+        drills.reload();
+        expect(
+            store
+                .borrow()
+                .drill_answer_record()
+                .map_err(|e| e.to_string())?
+                == (0, 0),
+            "an answer was recorded before anything was answered",
+        )?;
+
+        // Found first time.
+        drills.board().click(Square::B1);
+        drills.board().click(Square::B8);
+        let (asked, found) = store
+            .borrow()
+            .drill_answer_record()
+            .map_err(|e| e.to_string())?;
+        expect(
+            (asked, found) == (1, 1),
+            &format!("finding the move recorded {found} of {asked}")
+        )?;
+
+        // Two wrong answers are one failure to find it, not two. A first
+        // version of this asserted that answering correctly twice recorded
+        // once, which cannot happen — the exercise has moved on to the
+        // play-out by then — so it tested nothing.
+        let fresh = Rc::new(RefCell::new(seeded_store()?));
+        fresh
+            .borrow()
+            .record_drill_origin(
+                "selftst1",
+                &DrillOrigin {
+                    source: String::new(),
+                    played_at: chrono::Utc::now(),
+                    ply: 40,
+                    played: "Kh8".to_owned(),
+                    best: "Rb8".to_owned(),
+                    lost: 0.34,
+                    phase: "middlegame".to_owned(),
+                    win_before: 0.82,
+                    best_line: vec!["b1b8".to_owned()],
+                    game_id: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        let missed = DrillView::new(fresh.clone(), pieces.clone(), None);
+        missed.reload();
+        for _ in 0..2 {
+            missed.board().click(Square::B1);
+            missed.board().click(Square::B4);
+        }
+        let (asked, found) = fresh
+            .borrow()
+            .drill_answer_record()
+            .map_err(|e| e.to_string())?;
+        expect(
+            (asked, found) == (1, 0),
+            &format!("two wrong answers recorded {found} found of {asked} asked"),
+        )
+    }));
+
     // --- the exercise, which is the point of the tab ----------------------
     //
     // It used to open on "Play it out against the engine. What you played last

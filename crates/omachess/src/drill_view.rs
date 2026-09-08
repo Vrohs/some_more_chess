@@ -255,6 +255,8 @@ impl DrillView {
                 // One button, two jobs, because they are the two halves of one
                 // exercise: give up on finding it, then convert what you found.
                 if view.stage.get() == Stage::Find {
+                    // Asking to be shown is not finding it.
+                    view.record_answer(false);
                     view.reveal_answer();
                 } else {
                     view.begin();
@@ -474,6 +476,33 @@ impl DrillView {
         self.show_record();
     }
 
+    /// Note whether the move was found.
+    ///
+    /// Called exactly once per showing because answering — right, or wrong
+    /// twice, or asking to be shown — always moves the exercise on to the
+    /// play-out. A flag guarding against a second call was tried and removed:
+    /// nothing could reach it, and a guard that cannot be made to fire is not
+    /// protection, it is decoration that reads as protection.
+    ///
+    /// Kept apart from the play-out record because they are different
+    /// questions. Seeing the move and failing to win with it, and grinding out
+    /// a win from a position you never understood, both come out as one
+    /// successful attempt otherwise — and the first is the half this teaches.
+    fn record_answer(&self, found: bool) {
+        let Some((id, _, _)) = self.entry() else {
+            return;
+        };
+        if let Err(e) = self.store.borrow().record_drill_answer(
+            &id,
+            chrono::Utc::now(),
+            found,
+            self.misses.get(),
+        ) {
+            omachess_core::diagnostics::record_error("drill::record_answer", e);
+        }
+        self.show_record();
+    }
+
     fn steps_visible(&self, on: bool) {
         if let Some(row) = self.prev.parent() {
             row.set_visible(on);
@@ -620,10 +649,16 @@ impl DrillView {
                 omachess_core::store::MIN_REPEAT_HOURS
             )
         };
-        self.record.set_label(&if attempts == 0 {
-            format!("{waiting} positions waiting. None played out yet.{mastered}")
+        let (asked, found) = self.store.borrow().drill_answer_record().unwrap_or((0, 0));
+        let finding = if asked == 0 {
+            String::new()
         } else {
-            format!("{achieved} of {attempts} played out successfully.{mastered}")
+            format!(" Move found {found} of {asked} times.")
+        };
+        self.record.set_label(&if attempts == 0 {
+            format!("{waiting} positions waiting.{finding}{mastered}")
+        } else {
+            format!("{achieved} of {attempts} converted.{finding}{mastered}")
         });
     }
 
@@ -768,12 +803,14 @@ impl DrillView {
             if self.judge_answer(&mv) {
                 self.status.set_label("That is the move.");
                 self.lesson.set_label("");
+                self.record_answer(true);
                 self.reveal_answer();
             } else {
                 let misses = self.misses.get() + 1;
                 self.misses.set(misses);
                 if misses >= 2 {
                     self.status.set_label("Here it is.");
+                    self.record_answer(false);
                     self.reveal_answer();
                 } else {
                     self.status.set_label("Not that one.");

@@ -111,6 +111,20 @@ CREATE TABLE IF NOT EXISTS drill_attempts (
 );
 CREATE INDEX IF NOT EXISTS drill_attempts_puzzle ON drill_attempts (puzzle_id, attempted_at);
 
+-- Whether the move was found, which is a different question from whether the
+-- position was then converted. A solver can see the move and fail to win with
+-- it, or grind out a win from a position they never understood; recording only
+-- the result of playing it out cannot tell those apart, and the first is the
+-- half the exercise actually teaches.
+CREATE TABLE IF NOT EXISTS drill_answers (
+    id          INTEGER PRIMARY KEY,
+    puzzle_id   TEXT NOT NULL,
+    answered_at TEXT NOT NULL,
+    found       INTEGER NOT NULL,
+    misses      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS drill_answers_puzzle ON drill_answers (puzzle_id, answered_at);
+
 CREATE TABLE IF NOT EXISTS move_log (
     id         INTEGER PRIMARY KEY,
     session_id INTEGER,
@@ -1101,6 +1115,31 @@ impl Store {
         Ok(())
     }
 
+    /// Note whether the move was found, before any attempt to convert it.
+    pub fn record_drill_answer(
+        &self,
+        puzzle_id: &str,
+        at: DateTime<Utc>,
+        found: bool,
+        misses: u32,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO drill_answers (puzzle_id, answered_at, found, misses)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![puzzle_id, at, found as i64, misses],
+        )?;
+        Ok(())
+    }
+
+    /// How often the move was found, over how many times it was asked for.
+    pub fn drill_answer_record(&self) -> Result<(u32, u32)> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(found), 0) FROM drill_answers",
+            [],
+            |r| Ok((r.get::<_, i64>(0)? as u32, r.get::<_, i64>(1)? as u32)),
+        )?)
+    }
+
     /// Attempts and successes at playing drill positions out.
     pub fn drill_playout_record(&self) -> Result<(u32, u32)> {
         self.conn
@@ -1473,6 +1512,32 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn export_drill_answers(&self) -> Result<Vec<crate::backup::DrillAnswerRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT puzzle_id, answered_at, found, misses
+             FROM drill_answers ORDER BY answered_at ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::backup::DrillAnswerRow {
+                puzzle_id: r.get(0)?,
+                answered_at: r.get(1)?,
+                found: r.get::<_, i64>(2)? != 0,
+                misses: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Whether an answer at this instant is already on record, so a restore
+    /// merges rather than duplicating.
+    pub fn has_drill_answer(&self, at: DateTime<Utc>) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM drill_answers WHERE answered_at = ?1)",
+            params![at],
+            |r| r.get::<_, i64>(0),
+        )? != 0)
     }
 
     pub fn export_drill_positions(&self) -> Result<Vec<crate::backup::DrillRow>> {
