@@ -851,13 +851,19 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         let play = PlayView::new(store, pieces.clone(), engine);
         play.begin_game();
 
-        // A losing opening, played on purpose: 1.f3 e5 2.g4 walks into mate
-        // and every engine reply punishes it, so the review has something to
-        // find whatever the engine chooses.
-        play.board().drag(Square::F2, Square::F3);
-        pump(30, || play.moves_played() >= 2);
-        play.board().drag(Square::G2, Square::G4);
-        pump(30, || play.moves_played() >= 4);
+        // The king walks out. 1.f3 and 2.g4 only lose if Black finds the mate,
+        // and a capped engine does not always, so this failed about one run in
+        // four; a king on h4 by move four is a catastrophe against any reply.
+        for (from, to) in [
+            (Square::F2, Square::F3),
+            (Square::E1, Square::F2),
+            (Square::F2, Square::G3),
+            (Square::G3, Square::H4),
+        ] {
+            let before = play.moves_played();
+            play.board().drag(from, to);
+            pump(30, || play.moves_played() >= before + 2);
+        }
         play.give_up();
 
         expect(
@@ -874,7 +880,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         let flagged = play.flagged_moves();
         expect(
             flagged > 0,
-            "1.f3 and 2.g4 were played and the review flagged nothing, so this \
+            "the king was walked to h4 and the review flagged nothing, so this \
              check cannot say anything",
         )?;
         expect(
