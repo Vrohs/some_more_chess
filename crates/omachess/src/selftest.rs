@@ -22,7 +22,6 @@ use crate::drill_view::DrillView;
 use crate::endgame_view::EndgameView;
 use crate::pieces::PieceSet;
 use crate::play_view::PlayView;
-use crate::sound::Sounds;
 use crate::study_view::StudyView;
 use crate::trainer::Trainer;
 
@@ -155,7 +154,7 @@ fn seeded_store() -> Result<Store, String> {
 /// `filter` runs only the checks whose name contains it, which is how a check
 /// gets proved: break the thing it watches, run that one check, and see it go
 /// red. A check that has never failed is decoration.
-pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str>) -> bool {
+pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
     FILTER.with(|slot| *slot.borrow_mut() = filter.map(str::to_owned));
     let mut checks = Vec::new();
 
@@ -168,7 +167,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
     // --- the trainer: click a piece, click where it goes ------------------
     checks.push(check("a puzzle can be solved by clicking", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone(), None);
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
         trainer.begin_solving();
         expect(trainer.solving(), "the trainer did not start solving")?;
 
@@ -184,7 +183,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
 
     checks.push(check("a wrong move is refused, not accepted", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone(), None);
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
         trainer.begin_solving();
 
         // A legal but wrong rook move.
@@ -218,7 +217,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
                 )
                 .map_err(|e| e.to_string())?;
         }
-        let drills = DrillView::new(store.clone(), pieces.clone(), sounds.clone(), None);
+        let drills = DrillView::new(store.clone(), pieces.clone(), None);
         drills.reload();
         drills.begin();
 
@@ -272,7 +271,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
                 expect(engine.is_some(), "no engine on PATH, so nothing to play")?;
 
                 let store = Rc::new(RefCell::new(store));
-                let drills = DrillView::new(store.clone(), pieces.clone(), sounds.clone(), engine);
+                let drills = DrillView::new(store.clone(), pieces.clone(), engine);
                 drills.reload();
                 drills.begin();
 
@@ -317,7 +316,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
     checks.push(check("a refused move says why, across the window", || {
         use crate::announce::{self, Tone};
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let trainer = Trainer::new(store, pieces.clone(), sounds.clone(), None);
+        let trainer = Trainer::new(store, pieces.clone(), None);
         trainer.begin_solving();
         announce::clear();
 
@@ -350,7 +349,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
                 0.85,
             )
             .map_err(|e| e.to_string())?;
-        let drills = DrillView::new(store, pieces.clone(), sounds.clone(), None);
+        let drills = DrillView::new(store, pieces.clone(), None);
         drills.reload();
         drills.begin();
         announce::clear();
@@ -384,7 +383,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
                 0.85,
             )
             .map_err(|e| e.to_string())?;
-        let drills = DrillView::new(store, pieces.clone(), sounds.clone(), None);
+        let drills = DrillView::new(store, pieces.clone(), None);
         drills.reload();
         drills.begin();
         announce::clear();
@@ -464,7 +463,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
     // test in the core and does nothing at all on screen.
     checks.push(check("a game against the engine starts", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let play = PlayView::new(store, pieces.clone(), sounds.clone(), None);
+        let play = PlayView::new(store, pieces.clone(), None);
         play.begin_game();
         expect(
             play.game_running(),
@@ -478,7 +477,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
 
     checks.push(check("a move clicked on the board is played", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let play = PlayView::new(store, pieces.clone(), sounds.clone(), None);
+        let play = PlayView::new(store, pieces.clone(), None);
         play.begin_game();
         play.board().click(Square::E2);
         expect(
@@ -494,7 +493,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
 
     checks.push(check("a move dragged on the board is played", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let play = PlayView::new(store, pieces.clone(), sounds.clone(), None);
+        let play = PlayView::new(store, pieces.clone(), None);
         play.begin_game();
         play.board().drag(Square::D2, Square::D4);
         expect(
@@ -505,7 +504,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
 
     checks.push(check("the move just played is marked on the board", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let play = PlayView::new(store, pieces.clone(), sounds.clone(), None);
+        let play = PlayView::new(store, pieces.clone(), None);
         play.begin_game();
         play.board().drag(Square::E2, Square::E4);
         expect(
@@ -518,7 +517,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
 
     checks.push(check("the opening is named while it is being played", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let play = PlayView::new(store, pieces.clone(), sounds.clone(), None);
+        let play = PlayView::new(store, pieces.clone(), None);
         play.begin_game();
         play.board().drag(Square::E2, Square::E4);
         expect(
@@ -537,7 +536,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         let engine = omachess_core::engine::find_engine();
         expect(engine.is_some(), "no engine on PATH, so nothing to record")?;
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let play = PlayView::new(store.clone(), pieces.clone(), sounds.clone(), engine);
+        let play = PlayView::new(store.clone(), pieces.clone(), engine);
         play.begin_game();
         play.board().drag(Square::E2, Square::E4);
         play.give_up();
@@ -567,7 +566,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
     // --- Endgames: the one part of chess with a settled answer -------------
     checks.push(check("an endgame starts and accepts a move", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let endgames = EndgameView::new(store, pieces.clone(), sounds.clone(), None);
+        let endgames = EndgameView::new(store, pieces.clone(), None);
         endgames.begin_attempt();
         // The first entry is king and pawn with the king in front: White plays
         // Kd6, and Kc6 is the one king move that is not next to Black's.
@@ -584,7 +583,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
 
     checks.push(check("an endgame accepts a dragged move too", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let endgames = EndgameView::new(store, pieces.clone(), sounds.clone(), None);
+        let endgames = EndgameView::new(store, pieces.clone(), None);
         endgames.begin_attempt();
         endgames.board().drag(Square::D6, Square::C6);
         expect(
@@ -598,7 +597,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
 
     checks.push(check("the fifty-move countdown is on screen", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let endgames = EndgameView::new(store, pieces.clone(), sounds.clone(), None);
+        let endgames = EndgameView::new(store, pieces.clone(), None);
         endgames.begin_attempt();
         expect(
             !endgames.countdown_text().is_empty(),
@@ -642,7 +641,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
     checks.push(check("the progress view draws from real data", || {
         use gtk4::prelude::*;
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone(), None);
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
         trainer.begin_solving();
         trainer.board().click(Square::B1);
         trainer.board().click(Square::B8);
@@ -664,7 +663,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
     // --- the board's own vocabulary ---------------------------------------
     checks.push(check("mate is marked on the king that is mated", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let trainer = Trainer::new(store, pieces.clone(), sounds.clone(), None);
+        let trainer = Trainer::new(store, pieces.clone(), None);
         trainer.begin_solving();
         // Rb1-b8 is mate; the black king is on h8.
         trainer.board().click(Square::B1);
@@ -712,7 +711,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         let engine = omachess_core::engine::find_engine();
         expect(engine.is_some(), "no engine on PATH, so nothing to answer")?;
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let play = PlayView::new(store, pieces.clone(), sounds.clone(), engine);
+        let play = PlayView::new(store, pieces.clone(), engine);
         play.begin_game();
         play.board().drag(Square::E2, Square::E4);
         expect(
@@ -728,7 +727,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         let engine = omachess_core::engine::find_engine();
         expect(engine.is_some(), "no engine on PATH, so nothing to defend")?;
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let endgames = EndgameView::new(store, pieces.clone(), sounds.clone(), engine);
+        let endgames = EndgameView::new(store, pieces.clone(), engine);
         endgames.begin_attempt();
         endgames.board().drag(Square::D6, Square::C6);
         expect(
@@ -772,7 +771,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         let engine = omachess_core::engine::find_engine();
         expect(engine.is_some(), "no engine on PATH, so nothing to report")?;
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let play = PlayView::new(store, pieces.clone(), sounds.clone(), engine);
+        let play = PlayView::new(store, pieces.clone(), engine);
         play.begin_game();
         play.board().drag(Square::E2, Square::E4);
         play.give_up();
@@ -806,7 +805,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
     // --- the clock, which is where this player's losses come from ----------
     checks.push(check("a timed game's clock runs down", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let play = PlayView::new(store, pieces.clone(), sounds.clone(), None);
+        let play = PlayView::new(store, pieces.clone(), None);
         // The first entry is a real time control; the last is untimed.
         play.pick_time_control(0);
         play.begin_game();
@@ -818,20 +817,6 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         expect(
             pump(10, || play.clock_text() != first),
             &format!("the clock stayed on {first} and never moved"),
-        )
-    }));
-
-    // --- sound: not whether it is audible, but whether there is anything ---
-    checks.push(check("every sound cue has a clip to play", || {
-        let missing = sounds.missing_clips();
-        expect(
-            missing.is_empty(),
-            &format!(
-                "these cues would play in silence: {}. Silence is \
-                 indistinguishable from the sound being off, so nobody would \
-                 ever report it",
-                missing.join(", ")
-            ),
         )
     }));
 
@@ -853,7 +838,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         // this check built on one passed while the engine was being consulted
         // on every accepted move.
         let store = Rc::new(RefCell::new(two_move_store()?));
-        let trainer = Trainer::new(store, pieces.clone(), sounds.clone(), engine);
+        let trainer = Trainer::new(store, pieces.clone(), engine);
         trainer.begin_solving();
 
         // Solve it correctly, start to finish. Nothing on this path may consult
@@ -882,7 +867,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         let engine = omachess_core::engine::find_engine();
         expect(engine.is_some(), "no engine on PATH, so nothing to explain")?;
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let trainer = Trainer::new(store, pieces.clone(), sounds.clone(), engine);
+        let trainer = Trainer::new(store, pieces.clone(), engine);
         trainer.begin_solving();
 
         // Legal, and not the answer. Rb1-b4 hangs nothing but solves nothing.
@@ -923,7 +908,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         let engine = omachess_core::engine::find_engine();
         expect(engine.is_some(), "no engine on PATH, so no report to read")?;
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let play = PlayView::new(store, pieces.clone(), sounds.clone(), engine);
+        let play = PlayView::new(store, pieces.clone(), engine);
         play.begin_game();
         play.board().drag(Square::E2, Square::E4);
         pump(30, || play.moves_played() >= 2);
@@ -969,7 +954,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
             )),
             Err(_) => Rc::new(RefCell::new(seeded_store()?)),
         };
-        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone(), None);
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
         trainer.begin_solving();
         trainer.board().click(Square::B1);
         trainer.board().click(Square::B8);

@@ -11,7 +11,6 @@ mod pieces;
 mod play_view;
 mod progress_view;
 mod selftest;
-mod sound;
 mod study_view;
 mod style;
 mod trainer;
@@ -808,8 +807,7 @@ fn command_selftest(filter: Option<String>) -> anyhow::Result<()> {
     app.connect_activate(move |app| {
         style::install();
         let pieces = pieces::PieceSet::discover(&paths::pieces_dir()).map(std::rc::Rc::new);
-        let sounds = std::rc::Rc::new(sound::Sounds::new());
-        result.set(selftest::run(pieces, sounds, filter.as_deref()));
+        result.set(selftest::run(pieces, filter.as_deref()));
         app.quit();
     });
     app.run_with_args::<&str>(&[]);
@@ -839,25 +837,18 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         None => eprintln!("omachess: no engine on PATH — play is unavailable"),
     }
 
-    let sounds = Rc::new(sound::Sounds::new());
-    if !sounds.is_audible() {
-        eprintln!("omachess: no audio player found — running silent");
-    }
-
-    let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone(), engine.clone());
+    let trainer = Trainer::new(store.clone(), pieces.clone(), engine.clone());
     let play = play_view::PlayView::new(
         store.clone(),
         pieces.clone(),
-        sounds.clone(),
         engine.clone(),
     );
     let endgames = endgame_view::EndgameView::new(
         store.clone(),
         pieces.clone(),
-        sounds.clone(),
         engine.clone(),
     );
-    let drills = drill_view::DrillView::new(store.clone(), pieces.clone(), sounds, engine.clone());
+    let drills = drill_view::DrillView::new(store.clone(), pieces.clone(), engine.clone());
     let study = study_view::StudyView::new(store, pieces, engine);
 
     let progress = progress_view::ProgressView::new();
@@ -904,16 +895,6 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         });
     }
 
-    // Train, Repeat and Progress are the application: solve puzzles at rising
-    // difficulty, re-solve them later, find out whether you got faster. The
-    // other four tabs exist and are tested, but none of them is finished, and a
-    // tab that half-works is worse than a tab that is not there — it is what
-    // makes the whole thing feel broken. They come back one at a time, each to
-    // the same bar as this path. `OMACHESS_ALL_TABS=1` shows them meanwhile.
-    // A PGN named on the command line is a request for the Study tab, so that
-    // one argument brings it back on its own rather than failing silently.
-    let everything = std::env::var_os("OMACHESS_ALL_TABS").is_some() || study_file.is_some();
-
     let stack = adw::ViewStack::new();
     stack.add_titled_with_icon(
         trainer.widget(),
@@ -921,32 +902,30 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         "Train",
         "applications-games-symbolic",
     );
-    if everything {
-        stack.add_titled_with_icon(
-            play.widget(),
-            Some("play"),
-            "Play",
-            "media-playback-start-symbolic",
-        );
-        stack.add_titled_with_icon(
-            drills.widget(),
-            Some("drill"),
-            "Drill",
-            "media-playlist-repeat-symbolic",
-        );
-        stack.add_titled_with_icon(
-            endgames.widget(),
-            Some("endgames"),
-            "Endgames",
-            "view-grid-symbolic",
-        );
-        stack.add_titled_with_icon(
-            study.widget(),
-            Some("study"),
-            "Study",
-            "accessories-text-editor-symbolic",
-        );
-    }
+    stack.add_titled_with_icon(
+        play.widget(),
+        Some("play"),
+        "Play",
+        "media-playback-start-symbolic",
+    );
+    stack.add_titled_with_icon(
+        drills.widget(),
+        Some("drill"),
+        "Drill",
+        "media-playlist-repeat-symbolic",
+    );
+    stack.add_titled_with_icon(
+        endgames.widget(),
+        Some("endgames"),
+        "Endgames",
+        "view-grid-symbolic",
+    );
+    stack.add_titled_with_icon(
+        study.widget(),
+        Some("study"),
+        "Study",
+        "accessories-text-editor-symbolic",
+    );
     stack.add_titled_with_icon(
         &progress_page,
         Some("progress"),

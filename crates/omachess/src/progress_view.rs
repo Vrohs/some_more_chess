@@ -108,9 +108,11 @@ impl ProgressView {
             }
         }
 
-        // The tabs these belong to are hidden until they are finished, and a
-        // report on a tab nobody can open is the same fluff in another place.
-        if std::env::var_os("OMACHESS_ALL_TABS").is_some() {
+        // Reported when there is something to report, like everything else on
+        // this page. These were behind a flag while their tabs were hidden,
+        // which meant the window the author ran and the window the user ran
+        // were different applications.
+        if !data.games.is_empty() || !data.openings.is_empty() || !data.endgames.is_empty() {
             self.root.append(&section_title("Games against the engine"));
             self.root
                 .append(&play_section(data.play.as_ref(), data.games.len()));

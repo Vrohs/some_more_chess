@@ -32,7 +32,6 @@ use std::time::Instant;
 use crate::board::BoardView;
 use crate::engine_worker::{EngineWorker, Reply, Request};
 use crate::pieces::PieceSet;
-use crate::sound::{Cue, Sounds};
 
 /// How often replies from the engine thread are collected.
 const POLL_MS: u32 = 80;
@@ -40,7 +39,6 @@ const POLL_MS: u32 = 80;
 pub struct PlayView {
     root: GtkBox,
     board: Rc<BoardView>,
-    sounds: Rc<Sounds>,
     store: Rc<RefCell<Store>>,
     worker: Option<EngineWorker>,
     game: RefCell<Option<Game>>,
@@ -93,7 +91,6 @@ impl PlayView {
     pub fn new(
         store: Rc<RefCell<Store>>,
         pieces: Option<Rc<PieceSet>>,
-        sounds: Rc<Sounds>,
         engine: Option<std::path::PathBuf>,
     ) -> Rc<Self> {
         let board = BoardView::new(pieces);
@@ -271,7 +268,6 @@ impl PlayView {
         let view = Rc::new(Self {
             root,
             board,
-            sounds,
             store,
             worker,
             game: RefCell::new(None),
@@ -782,22 +778,6 @@ impl PlayView {
         self.offer_move(from, to);
     }
 
-    /// Which sound a move deserves, judged before the position moves on.
-    fn cue_for(&self, mv: &Move) -> Cue {
-        let gives_check = self
-            .game
-            .borrow()
-            .as_ref()
-            .is_some_and(|game| game.position().is_check());
-        if gives_check {
-            Cue::Check
-        } else if mv.is_capture() {
-            Cue::Capture
-        } else {
-            Cue::Move
-        }
-    }
-
     /// True while the post-game exercise is waiting for an answer.
     fn drilling(&self) -> bool {
         self.drill
@@ -1060,7 +1040,6 @@ impl PlayView {
         }
         self.show_clocks();
         self.after_move(Some((mv.from(), mv.to())));
-        self.sounds.play(self.cue_for(mv));
         self.request_engine_if_due();
     }
 
@@ -1180,7 +1159,6 @@ impl PlayView {
             )
         };
 
-        self.sounds.play(Cue::End);
         self.resign.set_visible(false);
         self.turn_started.set(None);
 
@@ -1254,9 +1232,8 @@ impl PlayView {
                             None => None,
                         }
                     };
-                    if let Some((_, _, ref mv)) = played {
+                    if played.is_some() {
                         self.after_move(played.map(|(from, to, _)| (from, to)));
-                        self.sounds.play(self.cue_for(mv));
                         self.turn_started.set(Some(Instant::now()));
                         self.request_engine_if_due();
                     }
@@ -1339,7 +1316,6 @@ impl PlayView {
             // A misdrag is not an answer, so it costs nothing.
             Offer::Illegal => {}
             Offer::Correct { reply, finished } => {
-                self.sounds.play(Cue::Solved);
                 self.show_drill_position(reply.as_deref());
                 self.status.set_label(if finished {
                     "That is the whole line."
@@ -1349,7 +1325,6 @@ impl PlayView {
                 self.describe_drill(finished, None);
             }
             Offer::Wrong { revealed: None, .. } => {
-                self.sounds.play(Cue::Wrong);
                 self.status.set_label("Not that one. Look again.");
                 crate::announce::say(crate::announce::Tone::Rejected, "Not that one. Look again.");
             }
@@ -1358,7 +1333,6 @@ impl PlayView {
                 reply,
                 finished,
             } => {
-                self.sounds.play(Cue::Move);
                 self.show_drill_position(reply.as_deref());
                 self.status.set_label(if finished {
                     "That was the line."

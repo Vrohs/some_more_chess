@@ -19,7 +19,6 @@ use crate::board::BoardView;
 use crate::engine_worker::{EngineWorker, Reply, Request};
 use crate::pieces::PieceSet;
 use crate::progress_view::ProgressData;
-use crate::sound::{Cue, Sounds};
 
 /// How deep the refutation is searched. Deeper than a move in a game needs to
 /// be, because this one is being explained rather than played, and the solver
@@ -55,7 +54,6 @@ pub struct Trainer {
     store: Rc<RefCell<Store>>,
     session: Session,
     board: Rc<BoardView>,
-    sounds: Rc<Sounds>,
     mode_switch: Switch,
     /// What the solver actually played here, once it can be shown.
     origin: Label,
@@ -95,7 +93,6 @@ impl Trainer {
     pub fn new(
         store: Rc<RefCell<Store>>,
         pieces: Option<Rc<PieceSet>>,
-        sounds: Rc<Sounds>,
         engine: Option<std::path::PathBuf>,
     ) -> Rc<Self> {
         let board = BoardView::new(pieces);
@@ -223,7 +220,6 @@ impl Trainer {
             store,
             session: Session::new(),
             board,
-            sounds,
             mode_switch,
             origin,
             mode_caption,
@@ -669,14 +665,7 @@ impl Trainer {
             .is_some_and(|current| current.started_solving)
     }
 
-    fn in_check(&self) -> bool {
-        self.current
-            .borrow()
-            .as_ref()
-            .is_some_and(|c| c.attempt.position().is_check())
-    }
-
-    fn has_own_piece(&self, square: Square) -> bool {
+     fn has_own_piece(&self, square: Square) -> bool {
         self.current
             .borrow()
             .as_ref()
@@ -803,7 +792,6 @@ impl Trainer {
 
         match outcome {
             Ok(MoveOutcome::Wrong) => {
-                self.sounds.play(Cue::Wrong);
                 self.reject();
                 // Only now. A wrong move has just set `failed`, and every
                 // measurement in this application counts correct attempts
@@ -823,7 +811,6 @@ impl Trainer {
                 // is the change the solver has to read before answering.
                 self.board
                     .set_last_move(reply.from().map(|from| (from, reply.to())));
-                self.sounds.play(cue_for(&reply, self.in_check()));
                 self.status.set_label("Good — keep going");
             }
             Ok(MoveOutcome::Solved) => {
@@ -841,7 +828,6 @@ impl Trainer {
                 }
                 self.board
                     .set_last_move(mv.from().map(|from| (from, mv.to())));
-                self.sounds.play(Cue::Solved);
                 self.finish();
             }
             Err(e) => self.status.set_label(&format!("{e}")),
@@ -1033,18 +1019,6 @@ fn compact(count: u64) -> String {
     }
 }
 
-/// Which sound a move deserves: check is more worth hearing than a capture,
-/// and a capture more than a quiet move.
-fn cue_for(mv: &Move, gives_check: bool) -> Cue {
-    if gives_check {
-        Cue::Check
-    } else if mv.is_capture() {
-        Cue::Capture
-    } else {
-        Cue::Move
-    }
-}
-
 fn humanise(span: Span) -> String {
     let minutes = span.num_minutes();
     if minutes < 1 {
@@ -1135,31 +1109,6 @@ mod tests {
         use omachess_core::store::MIN_REPEAT_HOURS;
         let threshold = Duration::minutes((MIN_REPEAT_HOURS * 60.0) as i64);
         assert_eq!(humanise(threshold), "20 h");
-    }
-
-    /// Check is worth hearing over a capture, and a capture over a quiet move,
-    /// so a checking capture must not be announced as an ordinary one.
-    #[test]
-    fn check_is_heard_over_a_capture() {
-        use shakmaty::{Move, Role, Square};
-        let capture = Move::Normal {
-            role: Role::Queen,
-            from: Square::D1,
-            capture: Some(Role::Pawn),
-            to: Square::D7,
-            promotion: None,
-        };
-        let quiet = Move::Normal {
-            role: Role::Queen,
-            from: Square::D1,
-            capture: None,
-            to: Square::D4,
-            promotion: None,
-        };
-        assert_eq!(cue_for(&capture, true), Cue::Check);
-        assert_eq!(cue_for(&capture, false), Cue::Capture);
-        assert_eq!(cue_for(&quiet, true), Cue::Check);
-        assert_eq!(cue_for(&quiet, false), Cue::Move);
     }
 
     /// The king in check is highlighted, and it must be the king of the side to

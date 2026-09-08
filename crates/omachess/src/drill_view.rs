@@ -27,7 +27,6 @@ use shakmaty::{Color, Position, Square};
 use crate::board::BoardView;
 use crate::engine_worker::{EngineWorker, Reply, Request};
 use crate::pieces::PieceSet;
-use crate::sound::{Cue, Sounds};
 
 /// How long the engine gets for each defensive move. Long enough that the
 /// defence is genuinely hard, short enough that a session is not a wait.
@@ -37,7 +36,6 @@ const POLL_MS: u32 = 80;
 pub struct DrillView {
     root: GtkBox,
     board: Rc<BoardView>,
-    sounds: Rc<Sounds>,
     store: Rc<RefCell<Store>>,
     worker: Option<EngineWorker>,
     game: RefCell<Option<Game>>,
@@ -65,7 +63,6 @@ impl DrillView {
     pub fn new(
         store: Rc<RefCell<Store>>,
         pieces: Option<Rc<PieceSet>>,
-        sounds: Rc<Sounds>,
         engine: Option<std::path::PathBuf>,
     ) -> Rc<Self> {
         let board = BoardView::new(pieces);
@@ -148,7 +145,6 @@ impl DrillView {
         let view = Rc::new(Self {
             root,
             board,
-            sounds,
             store,
             worker,
             game: RefCell::new(None),
@@ -509,7 +505,6 @@ impl DrillView {
             );
             return;
         };
-        let capture = game.position().board().occupied().contains(to);
         if game.play(&mv).is_err() {
             crate::announce::say(
                 crate::announce::Tone::Rejected,
@@ -519,8 +514,6 @@ impl DrillView {
         }
         self.board.set_position(game.position());
         self.board.set_last_move(Some((from, to)));
-        self.sounds
-            .play(if capture { Cue::Capture } else { Cue::Move });
         drop(slot);
 
         {
@@ -682,7 +675,6 @@ impl DrillView {
         let Ok(mv) = parsed.to_move(game.position()) else {
             return;
         };
-        let capture = mv.is_capture();
         let (from, to) = (mv.from(), Some(mv.to()));
         if game.play(&mv).is_err() {
             self.status
@@ -693,8 +685,6 @@ impl DrillView {
         if let (Some(from), Some(to)) = (from, to) {
             self.board.set_last_move(Some((from, to)));
         }
-        self.sounds
-            .play(if capture { Cue::Capture } else { Cue::Move });
         drop(slot);
 
         self.update_countdown();
