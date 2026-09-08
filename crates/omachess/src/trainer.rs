@@ -358,6 +358,10 @@ impl Trainer {
         self.lesson_asks.get()
     }
 
+    pub(crate) fn status_text(&self) -> String {
+        self.status.text().to_string()
+    }
+
     pub(crate) fn lesson_text(&self) -> String {
         self.lesson.text().to_string()
     }
@@ -953,8 +957,11 @@ impl Trainer {
         } else {
             "Not the move \u{2014} try again".to_owned()
         };
+        // Said once. The status line sits beside the board and carries this,
+        // and the line under it explains why; announcing the same sentence
+        // across the window as well put it on screen twice, the second time in
+        // thirty-point type.
         self.status.set_label(&said);
-        crate::announce::say(crate::announce::Tone::Rejected, &said);
     }
 
     fn finish(self: &Rc<Self>) {

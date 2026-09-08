@@ -87,10 +87,11 @@ const DEFAULT_CSS: &str = r#"
    about what was wrong, and it was the only feedback of its kind. Every board
    outcome now arrives as text across the window instead. */
 .omachess-announce {
-    font-size: 30px;
+    font-size: 14px;
     font-weight: bold;
-    padding: 18px 24px;
-    margin: 0;
+    padding: 6px 14px;
+    margin: 8px;
+    border-radius: 6px;
 }
 .omachess-announce.rejected { background-color: @error_color;   color: #fff; }
 .omachess-announce.lost     { background-color: @error_color;   color: #fff; }

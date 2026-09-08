@@ -389,24 +389,29 @@ pub fn accuracy_values(points: &[GamePoint]) -> Vec<f64> {
     points.iter().map(|p| p.accuracy).collect()
 }
 
-/// Themes as horizontal bars, worst first, against your own average.
+/// Horizontal bars, worst first.
 ///
-/// Horizontal because the categories are words rather than dates, and words
-/// read along a bar and not under one. One colour for every bar: the categories
-/// have no order of their own, so shading them by value would spend the only
-/// free channel restating the length. What separates a weakness from a bad run
-/// is the hairline at your own average, not a hue.
-pub fn bar_chart(rows: Vec<(String, f64, u32)>, baseline: f64) -> DrawingArea {
-    const ROW: f64 = 26.0;
+/// `full` is the value a whole bar means and `baseline` an optional hairline to
+/// compare against, both in the same units as the rows. The row keeps its real
+/// value and the chart does its own scaling, because the alternative — handing
+/// it pre-scaled numbers — printed a 4.7% loss as "100%" on the widest bar.
+///
+/// One colour for every bar: the categories have no order of their own, so
+/// shading them by value would spend the only free channel restating the
+/// length. Text is drawn in the text ink rather than an accent, so a name is
+/// never mistaken for a value.
+pub fn bar_chart(rows: Vec<(String, f64, u32)>, full: f64, baseline: Option<f64>) -> DrawingArea {
+    const ROW: f64 = 24.0;
     const GAP: f64 = 6.0;
-    const NAMES: f64 = 108.0;
-    const VALUES: f64 = 62.0;
+    const NAMES: f64 = 100.0;
+    const VALUES: f64 = 74.0;
 
     let area = DrawingArea::builder()
-        .content_height((rows.len() as f64 * (ROW + GAP)) as i32 + 26)
+        .content_height((rows.len() as f64 * (ROW + GAP)) as i32 + 8)
         .hexpand(true)
         .build();
-    area.add_css_class("omachess-spark");
+
+    let full = if full.abs() < f64::EPSILON { 1.0 } else { full };
 
     area.set_draw_func(move |area, cr, width, _height| {
         let ink = ink(area);
@@ -417,10 +422,9 @@ pub fn bar_chart(rows: Vec<(String, f64, u32)>, baseline: f64) -> DrawingArea {
             return;
         }
         let span = right - left;
-        cr.set_font_size(11.0);
 
-        for (index, (name, rate, attempts)) in rows.iter().enumerate() {
-            let y = index as f64 * (ROW + GAP) + 4.0;
+        for (index, (name, value, count)) in rows.iter().enumerate() {
+            let y = index as f64 * (ROW + GAP);
             let mid = y + ROW / 2.0 + 4.0;
 
             set(cr, ink, 0.85);
@@ -431,35 +435,31 @@ pub fn bar_chart(rows: Vec<(String, f64, u32)>, baseline: f64) -> DrawingArea {
             cr.rectangle(left, y, span, ROW - 8.0);
             let _ = cr.fill();
 
-            set(cr, ink, 0.62);
-            cr.rectangle(left, y, span * rate.clamp(0.0, 1.0), ROW - 8.0);
+            set(cr, ink, 0.55);
+            cr.rectangle(left, y, span * (value / full).clamp(0.0, 1.0), ROW - 8.0);
             let _ = cr.fill();
 
+            // The value itself, never the fraction of the bar it filled.
             set(cr, ink, 0.85);
             label(
                 cr,
                 right + 8.0,
                 mid,
-                &format!("{:.0}%  n{attempts}", rate * 100.0),
+                &format!("{:.1}%  n{count}", value * 100.0),
                 11.0,
             );
         }
 
-        // Your own average, as a hairline across every bar.
-        let x = left + span * baseline.clamp(0.0, 1.0);
-        set(cr, ink, 0.55);
-        cr.set_line_width(1.0);
-        cr.move_to(x, 0.0);
-        cr.line_to(x, rows.len() as f64 * (ROW + GAP));
-        let _ = cr.stroke();
-        set(cr, ink, 0.7);
-        label(
-            cr,
-            (x - 14.0).max(left),
-            rows.len() as f64 * (ROW + GAP) + 14.0,
-            &format!("{:.0}%", baseline * 100.0),
-            10.0,
-        );
+        // Drawn only when there is something to compare against: a hairline at
+        // zero is not a reference, it is the edge of the chart with a label.
+        if let Some(baseline) = baseline.filter(|b| *b > 0.0) {
+            let x = left + span * (baseline / full).clamp(0.0, 1.0);
+            set(cr, ink, 0.6);
+            cr.set_line_width(1.0);
+            cr.move_to(x, 0.0);
+            cr.line_to(x, rows.len() as f64 * (ROW + GAP) - GAP);
+            let _ = cr.stroke();
+        }
     });
 
     area

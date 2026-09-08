@@ -132,6 +132,12 @@ pub struct MoveAnalysis {
     pub win_before: f64,
     pub win_after: f64,
     pub severity: Option<Severity>,
+    /// Whether a deeper look agreed this is worth teaching. A move can be a
+    /// blunder and still fail this — the position may have two moves as good
+    /// as each other, or the deeper search may prefer something else — and the
+    /// report must still say it was a blunder. Erasing the severity instead
+    /// made a game with three rejected candidates report as flawless.
+    pub confirmed: bool,
 }
 
 impl MoveAnalysis {
@@ -149,7 +155,10 @@ impl MoveAnalysis {
 
     /// Whether this move can be turned into a puzzle.
     pub fn is_drillable(&self) -> bool {
-        self.severity.is_some() && self.best != self.played && !self.setup_move.is_empty()
+        self.confirmed
+            && self.severity.is_some()
+            && self.best != self.played
+            && !self.setup_move.is_empty()
     }
 }
 
@@ -376,6 +385,8 @@ pub fn analyse_game(
                 let (setup_fen, setup_move) = previous.clone().unwrap_or_default();
 
                 analysis.moves.push(MoveAnalysis {
+                    // Until a deeper look says otherwise.
+                    confirmed: true,
                     ply,
                     setup_fen,
                     setup_move,
@@ -445,9 +456,14 @@ pub fn confirm_drillable(
         };
 
         if !confirmed || !unique {
-            // Not certain enough to teach, so it stays in the report as a
-            // note and stops being an exercise.
-            review.severity = None;
+            // Not certain enough to teach, so it stops being an exercise — but
+            // it stays exactly as severe as it was. This used to clear the
+            // severity, which took the move out of `counts()` as well as out of
+            // `drillable()`: a game where every candidate failed confirmation
+            // reported no blunders and no mistakes, offered nothing to
+            // practise, and told a player who had just resigned a piece down
+            // that they had played well.
+            review.confirmed = false;
             rejected += 1;
         } else if !deeper.pv.is_empty() {
             // Keep the better line while it is in hand.
@@ -648,6 +664,7 @@ mod tests {
     #[test]
     fn a_generated_id_is_stable_and_distinct() {
         let a = MoveAnalysis {
+            confirmed: true,
             ply: 4,
             setup_fen: "8/8/8/8/8/8/8/K6k w - - 0 1".into(),
             setup_move: "a1a2".into(),
@@ -692,6 +709,7 @@ mod tests {
 
     fn drillable_move() -> MoveAnalysis {
         MoveAnalysis {
+            confirmed: true,
             ply: 3,
             setup_fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".into(),
             setup_move: "e2e4".into(),
@@ -742,6 +760,7 @@ mod tests {
     #[test]
     fn confirmation_leaves_sound_moves_alone() {
         let quiet = MoveAnalysis {
+            confirmed: true,
             severity: None,
             ..drillable_move()
         };
@@ -753,10 +772,57 @@ mod tests {
         assert_eq!(confirm_drillable(&mut evaluator, &mut analysis).unwrap(), 0);
     }
 
+    /// A rejected candidate stops being an exercise and stays a blunder.
+    ///
+    /// This cost a real game. Twenty-two moves, a rook lost to a knight fork,
+    /// resigned sixteen points down — reported as 92% accuracy, no blunders, no
+    /// mistakes, and nothing offered to practise. Every candidate had failed
+    /// confirmation, and rejection cleared the severity, which took the moves
+    /// out of `counts()` as well as out of `drillable()`. The report is what
+    /// the player reads to find out how they played; it must not be edited by
+    /// a decision about what makes a good puzzle.
+    #[test]
+    fn a_rejected_candidate_is_still_reported_as_the_blunder_it_was() {
+        let blunder = MoveAnalysis {
+            confirmed: true,
+            severity: Some(Severity::Blunder),
+            ..drillable_move()
+        };
+        let mut analysis = GameAnalysis {
+            moves: vec![blunder],
+        };
+        // An evaluator that prefers something else, so confirmation fails.
+        let mut evaluator = FixedEvaluator {
+            best: "h2h4",
+            pv: Vec::new(),
+        };
+        assert_eq!(
+            confirm_drillable(&mut evaluator, &mut analysis).unwrap(),
+            1,
+            "the candidate should have been rejected"
+        );
+
+        assert_eq!(
+            analysis.counts().blunders,
+            1,
+            "a rejected candidate vanished from the report, so a game with a \
+             rook hanging read as flawless"
+        );
+        assert!(
+            analysis.drillable().is_empty(),
+            "a rejected candidate is still being offered as an exercise"
+        );
+        assert!(
+            analysis.critical_moment().is_none(),
+            "a rejected candidate is still being offered as the moment it turned"
+        );
+    }
+
     #[test]
     fn accuracy_is_perfect_when_nothing_is_given_away() {
         let mut analysis = GameAnalysis::default();
         analysis.moves.push(MoveAnalysis {
+            confirmed: true,
             ply: 0,
             setup_fen: String::new(),
             setup_move: String::new(),
@@ -775,6 +841,7 @@ mod tests {
     #[test]
     fn a_single_blunder_moves_the_mean_but_not_the_median() {
         let quiet = |ply| MoveAnalysis {
+            confirmed: true,
             ply,
             setup_fen: String::new(),
             setup_move: String::new(),
@@ -790,6 +857,7 @@ mod tests {
             moves: (0..9).map(quiet).collect(),
         };
         analysis.moves.push(MoveAnalysis {
+            confirmed: true,
             ply: 9,
             setup_fen: "fen".into(),
             setup_move: "e7e5".into(),
@@ -814,6 +882,7 @@ mod tests {
     #[test]
     fn finding_better_than_the_engine_is_not_banked_as_credit() {
         let m = MoveAnalysis {
+            confirmed: true,
             ply: 0,
             setup_fen: String::new(),
             setup_move: String::new(),
@@ -858,6 +927,7 @@ mod tests {
     fn moves_are_described_the_way_players_write_them() {
         // White to move, castling available.
         let review = MoveAnalysis {
+            confirmed: true,
             ply: 10,
             setup_fen: "rnbqk2r/pppp1ppp/5n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 1".into(),
             setup_move: "e8g8".into(),
@@ -1049,6 +1119,7 @@ mod time_tests {
 
     fn move_at(ply: usize, lost: f64) -> MoveAnalysis {
         MoveAnalysis {
+            confirmed: true,
             ply,
             setup_fen: String::new(),
             setup_move: String::new(),

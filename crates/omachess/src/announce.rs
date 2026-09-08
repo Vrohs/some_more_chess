@@ -86,8 +86,11 @@ thread_local! {
 
 /// Put the banner over `overlay`, which should wrap the whole window content.
 pub fn install(overlay: &Overlay) {
+    // A compact strip, not a slab across the window. This was 30px bold with
+    // heavy padding on a solid ground, which for a refused move — a thing that
+    // happens several times a puzzle — read as an emergency.
     let label = Label::builder()
-        .halign(Align::Fill)
+        .halign(Align::Center)
         .valign(Align::Start)
         .wrap(true)
         .justify(gtk4::Justification::Center)

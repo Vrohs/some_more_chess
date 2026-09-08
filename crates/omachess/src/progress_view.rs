@@ -78,7 +78,8 @@ impl ProgressView {
             self.root.append(&caption("Line marks your overall accuracy."));
             self.root.append(&charts::bar_chart(
                 data.themes.clone(),
-                data.baseline_success,
+                1.0,
+                Some(data.baseline_success),
             ));
         }
 

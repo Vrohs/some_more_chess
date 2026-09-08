@@ -205,6 +205,7 @@ mod tests {
     /// continues 4.Qf3 Nf6.
     fn blunder() -> MoveAnalysis {
         MoveAnalysis {
+            confirmed: true,
             ply: 5,
             setup_fen: "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/8/PPPP1PPP/RNBQK1NR w KQkq - 0 3".into(),
             setup_move: "d1h5".into(),

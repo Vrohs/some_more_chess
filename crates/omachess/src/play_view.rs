@@ -859,21 +859,16 @@ impl PlayView {
             let rows: Vec<(String, f64, u32)> = phases
                 .iter()
                 .map(|(phase, loss, moves)| {
-                    (phase.label().to_owned(), loss / worst, *moves as u32)
+                    (phase.label().to_owned(), *loss, *moves as u32)
                 })
                 .collect();
             self.report_box
                 .append(&crate::figures::section_title("Given away, by phase"));
-            self.report_box.append(&crate::charts::bar_chart(rows, 0.0));
-            self.report_box.append(&crate::figures::stat_line(
-                &phases
-                    .iter()
-                    .map(|(phase, loss, _)| {
-                        format!("{} {:.1}%", phase.label(), loss * 100.0)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("   "),
-            ));
+            // Scaled to the worst phase so the smaller ones are still visible,
+            // and each bar labelled with what it actually is. The line under it
+            // said the same numbers again.
+            self.report_box
+                .append(&crate::charts::bar_chart(rows, worst, None));
         }
 
         // Whether the errors came from moving quickly is a different diagnosis

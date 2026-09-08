@@ -317,23 +317,28 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
     }
 
     // --- what the board says, now that it no longer flashes red -----------
-    checks.push(check("a refused move says why, across the window", || {
-        use crate::announce::{self, Tone};
+    //
+    // Beside the board, not across the window. The refusal used to be stated
+    // twice — once in the status line and once as a thirty-point strip over
+    // everything — for a thing that happens several times a puzzle.
+    checks.push(check("a refused move says why, beside the board", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
         let trainer = Trainer::new(store, pieces.clone(), None);
         trainer.begin_solving();
-        announce::clear();
 
         // A legal rook move that is not the answer.
         trainer.board().click(Square::B1);
         trainer.board().click(Square::B4);
 
-        let said = announce::last().ok_or("nothing was announced for a wrong move")?;
+        let said = trainer.status_text();
         expect(
-            said.0 == Tone::Rejected,
-            &format!("a wrong move was announced as {:?}", said.0),
+            said.to_lowercase().contains("not the move"),
+            &format!("a wrong move was not refused in words: {said:?}"),
         )?;
-        expect(!said.1.is_empty(), "the rejection had no words in it")
+        expect(
+            crate::announce::last().is_none(),
+            "the refusal is still being shouted across the window as well",
+        )
     }));
 
     checks.push(check("a finished drill announces the result", || {
