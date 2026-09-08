@@ -837,6 +837,56 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         )
     }));
 
+    // The one thing to do after a losing game, and it was not on the screen.
+    //
+    // A real game: twenty-two moves, a rook lost to a knight fork, resigned
+    // sixteen points down. The report said no blunders and offered nothing;
+    // once the report was fixed it said two blunders and still offered
+    // nothing, because the button was gated on the positions making clean
+    // puzzles. Going back over your own game does not need a unique answer.
+    checks.push(check("a game with a mistake offers it back to practise", || {
+        let engine = omachess_core::engine::find_engine();
+        expect(engine.is_some(), "no engine on PATH, so nothing to analyse")?;
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let play = PlayView::new(store, pieces.clone(), engine);
+        play.begin_game();
+
+        // A losing opening, played on purpose: 1.f3 e5 2.g4 walks into mate
+        // and every engine reply punishes it, so the review has something to
+        // find whatever the engine chooses.
+        play.board().drag(Square::F2, Square::F3);
+        pump(30, || play.moves_played() >= 2);
+        play.board().drag(Square::G2, Square::G4);
+        pump(30, || play.moves_played() >= 4);
+        play.give_up();
+
+        expect(
+            pump(120, || {
+                play.panel_labels().iter().any(|t| t.contains("Accuracy"))
+            }),
+            "the report never arrived, so nothing was checked",
+        )?;
+
+        // Asked of the analysis rather than of the panel's text, and at any
+        // severity rather than blunders alone: a first version keyed on the
+        // word "Blunders" and returned early when it read zero, so it passed
+        // without ever reaching the assertion.
+        let flagged = play.flagged_moves();
+        expect(
+            flagged > 0,
+            "1.f3 and 2.g4 were played and the review flagged nothing, so this \
+             check cannot say anything",
+        )?;
+        expect(
+            play.practise_offered(),
+            &format!(
+                "the review flagged {flagged} moves and the tab offers nothing \
+                 to practise. {}",
+                play.describe_state()
+            ),
+        )
+    }));
+
     // --- the engine as a teacher, and where it is not allowed --------------
     //
     // This is the load-bearing one. Every figure this application reports comes

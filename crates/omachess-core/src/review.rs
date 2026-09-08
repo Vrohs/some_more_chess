@@ -248,10 +248,24 @@ impl GameAnalysis {
 
     /// The single move where the most was given away — the moment the game
     /// turned. Worth practising above every other position in the game.
+    ///
+    /// Deliberately not `is_drillable`. That requires the deeper check to have
+    /// confirmed a single best move, which is what a *puzzle* needs: one
+    /// answer, clearly better than the second. Going back to where your own
+    /// game turned needs no such thing. A position with two moves as good as
+    /// each other is a fine place to be shown you hung a rook, and gating on
+    /// uniqueness meant a game with two blunders in it offered nothing to
+    /// practise at all.
+    ///
+    /// Ties go to the earlier ply — `max_by` keeps the last maximum, so this
+    /// walks in reverse to keep the first, matching `drillable()`.
     pub fn critical_moment(&self) -> Option<&MoveAnalysis> {
         self.moves
             .iter()
-            .filter(|m| m.is_drillable())
+            .rev()
+            .filter(|m| {
+                m.severity.is_some() && m.best != m.played && !m.setup_move.is_empty()
+            })
             .max_by(|a, b| {
                 a.lost()
                     .partial_cmp(&b.lost())
@@ -810,11 +824,16 @@ mod tests {
         );
         assert!(
             analysis.drillable().is_empty(),
-            "a rejected candidate is still being offered as an exercise"
+            "a rejected candidate is still being offered as a puzzle, and a \
+             puzzle needs the one answer this one has not got"
         );
+        // But it is still where the game turned. A puzzle needs a unique
+        // answer; going back over your own game does not, and requiring one
+        // left a game with two blunders in it offering nothing to practise.
         assert!(
-            analysis.critical_moment().is_none(),
-            "a rejected candidate is still being offered as the moment it turned"
+            analysis.critical_moment().is_some(),
+            "a blunder stopped being the moment the game turned because it \
+             would not make a clean puzzle"
         );
     }
 

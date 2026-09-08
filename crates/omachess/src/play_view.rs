@@ -231,14 +231,17 @@ impl PlayView {
         panel.append(&controls);
         panel.append(&clock_mine);
         panel.append(&status);
+        // Directly under the result. These were below the move list, which
+        // after a forty-move game is eighteen lines further down a scrolling
+        // panel: the one thing to do next, put where it cannot be seen.
+        panel.append(&drill_button);
+        panel.append(&add_button);
         panel.append(&detail);
         panel.append(&material);
         panel.append(&opening);
         panel.append(&moves_heading);
         panel.append(&move_scroll);
         panel.append(&review_scroll);
-        panel.append(&drill_button);
-        panel.append(&add_button);
         panel.append(&report_box);
         panel.append(&plan_box);
 
@@ -432,6 +435,28 @@ impl PlayView {
             &mut out,
         );
         out
+    }
+
+    /// Whether the thing to do after a game is on screen. Checked rather than
+    /// assumed: it was hidden for a game with two blunders in it, while the
+    /// report beside it said there were two.
+    pub(crate) fn practise_offered(&self) -> bool {
+        self.drill_button.is_visible()
+    }
+
+    /// How many moves the finished game flagged, at any severity.
+    pub(crate) fn flagged_moves(&self) -> usize {
+        self.report
+            .borrow()
+            .as_ref()
+            .map(|analysis| {
+                analysis
+                    .moves
+                    .iter()
+                    .filter(|m| m.severity.is_some())
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     pub(crate) fn status_text(&self) -> String {
@@ -1240,12 +1265,15 @@ impl PlayView {
                     let drillable = analysis.drillable().len();
                     let has_moment = analysis.critical_moment().is_some();
                     *self.report.borrow_mut() = Some(analysis);
+                    // Independently: going back to where the game turned needs
+                    // a mistake, and adding puzzles to the trainer needs ones
+                    // with a single right answer. Gating the first on the
+                    // second hid the button after a game with two blunders in
+                    // it, which is exactly the game worth going back over.
+                    self.drill_button.set_visible(has_moment);
+                    self.add_button.set_visible(drillable > 0);
                     if drillable > 0 {
                         self.populate_review();
-                        self.add_button.set_visible(true);
-                        self.drill_button.set_visible(has_moment);
-                    } else {
-                        self.add_button.set_visible(false);
                     }
                 }
                 // Evaluations belong to the study view; play never asks for one.
