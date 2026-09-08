@@ -814,6 +814,71 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         )
     }));
 
+    // --- Progress: a measurement, not an essay ----------------------------
+    //
+    // The page carried eight hundred and seventy-seven words of explanation
+    // around three real results, in thirteen sections, four of which reported
+    // on tabs that are not even open. It was an essay with numbers hidden in
+    // it. Prose is the failure mode here and it creeps back one helpful
+    // sentence at a time, so the limit is checked rather than remembered.
+    checks.push(check("the progress page states numbers, not paragraphs", || {
+        use gtk4::prelude::*;
+        const LIMIT: usize = 12;
+
+        // Against the real database when one is pointed at, because a seeded
+        // store has too little in it to draw most of the page, and the sections
+        // that never render are exactly the ones that used to carry the prose.
+        let store = match std::env::var("OMACHESS_SELFTEST_DB") {
+            Ok(path) => Rc::new(RefCell::new(
+                Store::open(std::path::Path::new(&path)).map_err(|e| e.to_string())?,
+            )),
+            Err(_) => Rc::new(RefCell::new(seeded_store()?)),
+        };
+        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone());
+        trainer.begin_solving();
+        trainer.board().click(Square::B1);
+        trainer.board().click(Square::B8);
+
+        let progress = crate::progress_view::ProgressView::new();
+        progress.refresh(&trainer.progress_data());
+
+        // Every label on the page, however deeply nested.
+        fn collect(widget: &gtk4::Widget, out: &mut Vec<String>) {
+            if let Some(label) = widget.downcast_ref::<gtk4::Label>() {
+                let text = label.text().to_string();
+                if !text.is_empty() {
+                    out.push(text);
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(node) = child {
+                collect(&node, out);
+                child = node.next_sibling();
+            }
+        }
+        let mut labels = Vec::new();
+        collect(progress.widget().upcast_ref::<gtk4::Widget>(), &mut labels);
+        expect(!labels.is_empty(), "the progress page came back blank")?;
+
+        let worst = labels
+            .iter()
+            .max_by_key(|text| text.split_whitespace().count())
+            .expect("a label");
+        let words = worst.split_whitespace().count();
+        expect(
+            words <= LIMIT,
+            &format!(
+                "a label runs to {words} words, over the {LIMIT}-word limit: {worst:?}"
+            ),
+        )?;
+
+        let total: usize = labels.iter().map(|t| t.split_whitespace().count()).sum();
+        expect(
+            total <= 120,
+            &format!("the page runs to {total} words across {} labels", labels.len()),
+        )
+    }));
+
     // --- the plan: what the application tells you to do -------------------
     checks.push(check("the plan always has something to say", || {
         let store = seeded_store()?;

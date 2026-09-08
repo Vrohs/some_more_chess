@@ -275,13 +275,14 @@ impl Trainer {
     pub fn progress_data(&self) -> ProgressData {
         use omachess_core::progress as p;
         let store = self.store.borrow();
-        let (weaknesses, baseline_success) = p::recurring_weaknesses(&store).unwrap_or_default();
+        let (_, baseline_success) = p::recurring_weaknesses(&store).unwrap_or_default();
         ProgressData {
-            weaknesses,
             baseline_success,
+            themes: store
+                .theme_success(p::MIN_THEME_ATTEMPTS)
+                .unwrap_or_default(),
             transfer: p::transfer_by_band(&store).unwrap_or_default(),
             overall: p::measured_improvement(&store).unwrap_or_default(),
-            bands: p::improvement_by_band(&store).unwrap_or_default(),
             solved: store.solved_count().unwrap_or(0),
             slopes: p::slope_points(&store).unwrap_or_default(),
             ratings: p::rating_history(&store)
@@ -294,8 +295,6 @@ impl Trainer {
             endgames: p::endgame_records(&store).unwrap_or_default(),
             openings: p::opening_records(&store).unwrap_or_default(),
             pressure: p::pressure_record(&store).unwrap_or_default(),
-            plan: omachess_core::plan::todays_plan(&store).unwrap_or_default(),
-            repeat_mode: store.repeat_mode().unwrap_or(false),
         }
     }
 

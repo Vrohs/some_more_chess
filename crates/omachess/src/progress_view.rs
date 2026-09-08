@@ -6,23 +6,20 @@
 
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Label, Orientation};
-use omachess_core::plan::{Step, SESSION_MINUTES};
 use omachess_core::progress::{
     EndgameRecord, GamePoint, Improvement, OpeningRecord, PlayTrend, PressureRecord, SlopePoint,
-    Transfer, Weakness, MIN_GAMES, MIN_OPENING_GAMES, MIN_PRESSURE_MOVES, MIN_RATING_POINTS,
-    MIN_THEME_ATTEMPTS, MIN_TRANSFER, SIGNIFICANT,
+    Transfer, MIN_GAMES, MIN_PAIRS, MIN_RATING_POINTS, MIN_THEME_ATTEMPTS, MIN_TRANSFER,
 };
-use omachess_core::store::MIN_REPEAT_HOURS;
 
 use crate::charts;
 
 /// Everything the page needs, gathered once.
 pub struct ProgressData {
-    pub weaknesses: Vec<Weakness>,
+    /// Every theme with enough attempts to be worth drawing, worst first.
+    pub themes: Vec<(String, f64, u32)>,
     pub baseline_success: f64,
     pub transfer: Vec<Transfer>,
     pub overall: Option<Improvement>,
-    pub bands: Vec<(u32, Improvement)>,
     pub solved: u64,
     pub slopes: Vec<SlopePoint>,
     pub ratings: Vec<f64>,
@@ -31,8 +28,6 @@ pub struct ProgressData {
     pub endgames: Vec<EndgameRecord>,
     pub openings: Vec<OpeningRecord>,
     pub pressure: Option<PressureRecord>,
-    pub plan: Vec<Step>,
-    pub repeat_mode: bool,
 }
 
 pub struct ProgressView {
@@ -61,286 +56,251 @@ impl ProgressView {
             self.root.remove(&child);
         }
 
-        // The diagnosis leads: what keeps going wrong is more use than any
-        // number, because it is the only thing here you can act on tomorrow.
-        // First, and above every finding below it: the findings are the
-        // evidence, this is what to do about them. A page that only diagnoses
-        // leaves the reader to work out their own session, which is the part
-        // they came here to be told.
-        self.root.append(&section_title("Today"));
-        if data.plan.is_empty() {
-            self.root.append(&caption("Nothing to suggest yet."));
-        } else {
-            let total: u32 = data.plan.iter().map(|step| step.minutes).sum();
-            self.root.append(&caption(&format!(
-                "About {total} minutes, inside a {SESSION_MINUTES} minute session. \
-                 Ordered by how directly each piece bears on your own games."
-            )));
-            for (index, step) in data.plan.iter().enumerate() {
-                self.root.append(&plan_row(index + 1, step));
-            }
-        }
+        // The verdict, the numbers, then the pictures. This page carried eight
+        // hundred words of explanation around three real results; the reader
+        // came for a measurement and had to read an essay to find one. What a
+        // figure means belongs in the manual, not beside every figure.
+        self.root.append(&hero(&data.transfer));
+        self.root.append(&tiles(data));
 
-        self.root.append(&section_title("What keeps costing you"));
-        if data.weaknesses.is_empty() {
-            self.root.append(&caption(&format!(
-                "Nothing stands out yet. A theme needs {MIN_THEME_ATTEMPTS} attempts before a bad \
-                 run can be told apart from a real weakness.",
-            )));
-        } else {
-            self.root.append(&caption(
-                "Themes you get wrong most often, worst first. These are drawn from what you \
-                 actually missed, not from a syllabus.",
-            ));
-            for weakness in &data.weaknesses {
-                self.root
-                    .append(&weakness_row(weakness, data.baseline_success));
-            }
-        }
-
-        // Transfer next, because it is the only figure that means "better at
-        // chess" rather than "better at these puzzles".
-        self.root
-            .append(&section_title("On puzzles you have never seen"));
-        self.root.append(&caption(
-            "Solving a fresh puzzle faster cannot be remembering it. Rating band is held fixed, \
-             so this compares puzzles of comparable difficulty rather than an easy run against \
-             a hard one. This is the marker that means you have improved at chess.",
-        ));
-        if data.transfer.is_empty() {
-            self.root.append(&caption(&format!(
-                "Not enough yet — {MIN_TRANSFER} first encounters are needed within a single \
-                 rating band before the earlier and later halves can be compared.",
-            )));
-        } else {
-            for transfer in &data.transfer {
-                self.root.append(&transfer_row(transfer));
-            }
-        }
-
-        self.root
-            .append(&section_title("On puzzles you had solved before"));
-        self.root.append(&caption(&format!(
-            "Retention, not skill: a puzzle re-solved quickly may simply be remembered. Only \
-             repeats at least {MIN_REPEAT_HOURS:.0} hours apart are counted, because anything \
-             sooner is recall of that position.",
-        )));
-
-        match data.overall.as_ref() {
-            Some(overall) => {
-                self.root.append(&headline(overall));
-                self.root.append(&verdict(overall));
-            }
-            None => self
-                .root
-                .append(&empty_state(data.solved, data.repeat_mode)),
-        }
-
-        // The slope chart is the measurement itself, drawn: one line per
-        // repeated puzzle, from its own first solve to its own latest.
-        if !data.slopes.is_empty() {
-            let improved = data.slopes.iter().filter(|p| p.improved()).count();
-            self.root.append(&caption(&format!(
-                "{improved} of {} repeated puzzles are faster than they were. Each line is one \
-                 puzzle, compared only against itself — hover to name it.",
-                data.slopes.len()
-            )));
-            self.root.append(&charts::slope_chart(data.slopes.clone()));
-        }
-
-        if data.bands.len() > 1 {
-            self.root.append(&section_title("By rating band"));
-            for (band, improvement) in &data.bands {
-                self.root.append(&band_row(*band, improvement));
-            }
-        }
-
-        self.root.append(&section_title("Blunders on a low clock"));
-        match &data.pressure {
-            None => self.root.append(&caption(&format!(
-                "Needs {MIN_PRESSURE_MOVES} moves played with a low clock. Only games played here \
-                 to a time control count — an imported game carries no clock, and counting it as \
-                 comfortable play would flatten the very effect this looks for.",
-            ))),
-            Some(record) => {
-                self.root.append(&caption(&format!(
-                    "Across {} timed game{}: {:.1}% of your moves on a low clock were blunders, \
-                     against {:.1}% with time in hand.",
-                    record.games,
-                    if record.games == 1 { "" } else { "s" },
-                    record.pressure_rate() * 100.0,
-                    record.calm_rate() * 100.0,
-                )));
-                if let Some(multiplier) = record.multiplier() {
-                    let verdict = Label::builder()
-                        .label(pressure_verdict(multiplier))
-                        .halign(Align::Start)
-                        .wrap(true)
-                        .build();
-                    if let Some(class) = pressure_class(multiplier) {
-                        verdict.add_css_class(class);
-                    }
-                    self.root.append(&verdict);
-                }
-            }
-        }
-
-        self.root.append(&section_title("Openings"));
-        if data.openings.is_empty() {
-            self.root.append(&caption(&format!(
-                "Nothing reached {MIN_OPENING_GAMES} times yet. Openings are recorded per game as \
-                 they are played or imported, so this fills in as games accumulate.",
-            )));
-        } else {
-            self.root.append(&caption(
-                "What you actually play, worst score first. Book depth is how far you were still \
-                 following a named line — leaving it early is not a fault in itself, but leaving \
-                 it early and scoring badly is where preparation pays.",
-            ));
-            for record in &data.openings {
-                self.root.append(&opening_row(record));
-            }
-        }
-
-        self.root.append(&section_title("Endgames converted"));
-        if data.endgames.is_empty() {
-            self.root.append(&caption(
-                "Nothing attempted yet. These are the only positions here with a settled answer: \
-                 a tablebase says the result, so converting one is evidence that does not depend \
-                 on an opponent, a rating pool or a search depth.",
-            ));
-        } else {
-            self.root.append(&caption(
-                "A tablebase settled each of these before it was offered, and the engine defends \
-                 uncapped. Nothing else on this page is this hard to argue with.",
-            ));
-            for record in &data.endgames {
-                self.root.append(&endgame_row(record));
-            }
-        }
-
-        self.root
-            .append(&section_title("What these numbers are not"));
-        self.root.append(&caption(
-            "Three different numbers here look like ratings and none of them are on the same \
-             scale. The puzzle rating below is a difficulty level borrowed from Lichess's puzzle \
-             pool. The engine rating further down is how strong an opponent you are holding. \
-             Neither is your Lichess or Chess.com rating, and those two are not each other \
-             either — the same player typically reads two to four hundred points lower on \
-             Chess.com than on Lichess, because they are separate pools with separate formulas. \
-             Compare each number only against its own history.",
-        ));
-
-        self.root.append(&section_title("Puzzle rating"));
-        if data.ratings.len() < MIN_RATING_POINTS {
-            self.root.append(&caption(&format!(
-                "{} of {MIN_RATING_POINTS} attempts. A rating line drawn from fewer than that \
-                 is a handful of coin flips with a trend through it, so it is not drawn yet.",
-                data.ratings.len()
-            )));
-        } else {
-            self.root.append(&caption(
-                "Replayed from every attempt you have made: solving harder puzzles raises it, \
-                 missing easier ones lowers it. It shows the difficulty you can handle, not how \
-                 fast you handle it.",
-            ));
+        if data.ratings.len() >= MIN_RATING_POINTS {
+            self.root.append(&section_title("Puzzle rating"));
+            self.root.append(&caption("Lichess puzzle scale, not your own rating."));
             self.root
                 .append(&charts::line_chart(data.ratings.clone(), "", None, true));
         }
 
-        self.root.append(&section_title("Games against the engine"));
-        self.root
-            .append(&play_section(data.play.as_ref(), data.games.len()));
-        if data.games.len() >= 2 {
-            self.root.append(&caption(
-                "Accuracy per game, oldest first. Dashed lines mark the median of the earlier \
-                 and later halves.",
-            ));
-            let reference = data
-                .play
-                .as_ref()
-                .map(|t| (t.earlier_accuracy, t.recent_accuracy));
-            self.root.append(&charts::line_chart(
-                charts::accuracy_values(&data.games),
-                "%",
-                reference,
-                true,
+        // Three is the fewest bars that show a spread; below that they are just
+        // numbers wearing a chart.
+        if data.themes.len() >= 3 {
+            self.root.append(&section_title("Accuracy by theme"));
+            self.root.append(&caption("Line marks your overall accuracy."));
+            self.root.append(&charts::bar_chart(
+                data.themes.clone(),
+                data.baseline_success,
             ));
         }
 
-        self.root.append(&method_note());
+        if !data.slopes.is_empty() {
+            let improved = data.slopes.iter().filter(|p| p.improved()).count();
+            self.root.append(&section_title("Repeats, each against itself"));
+            self.root.append(&caption(&format!(
+                "{improved} of {} faster than before.",
+                data.slopes.len()
+            )));
+            self.root.append(&charts::slope_chart(data.slopes.clone()));
+            if let Some(overall) = data.overall.as_ref() {
+                self.root.append(&stat_line(&format!(
+                    "{:.0}% faster   p {:.2}   n {}",
+                    (overall.median_speedup - 1.0) * 100.0,
+                    overall.p_value,
+                    overall.puzzles
+                )));
+            }
+        }
+
+        let pending = pending_rows(data);
+        if !pending.is_empty() {
+            self.root.append(&section_title("Not measurable yet"));
+            for row in pending {
+                self.root.append(&stat_line(&row));
+            }
+        }
+
+        // The tabs these belong to are hidden until they are finished, and a
+        // report on a tab nobody can open is the same fluff in another place.
+        if std::env::var_os("OMACHESS_ALL_TABS").is_some() {
+            self.root.append(&section_title("Games against the engine"));
+            self.root
+                .append(&play_section(data.play.as_ref(), data.games.len()));
+            if data.games.len() >= 2 {
+                let reference = data
+                    .play
+                    .as_ref()
+                    .map(|t| (t.earlier_accuracy, t.recent_accuracy));
+                self.root.append(&charts::line_chart(
+                    charts::accuracy_values(&data.games),
+                    "%",
+                    reference,
+                    true,
+                ));
+            }
+            for record in &data.openings {
+                self.root.append(&opening_row(record));
+            }
+            for record in &data.endgames {
+                self.root.append(&endgame_row(record));
+            }
+            if let Some(record) = &data.pressure {
+                self.root.append(&stat_line(&format!(
+                    "low clock {:.1}%   time in hand {:.1}%   n {}",
+                    record.pressure_rate() * 100.0,
+                    record.calm_rate() * 100.0,
+                    record.games
+                )));
+            }
+        }
     }
 }
 
-/// One band's transfer result, stated with the evidence behind it.
-fn transfer_row(transfer: &Transfer) -> GtkBox {
+/// The one figure the page leads with: are you solving unseen puzzles faster?
+///
+/// Unseen, because a puzzle you have met before can be remembered rather than
+/// understood. Held to one rating band, because a run of easy puzzles is faster
+/// than a run of hard ones whatever the solver does. It is the only number here
+/// that means "better at chess" rather than "better at these puzzles".
+fn hero(transfer: &[Transfer]) -> GtkBox {
     let outer = GtkBox::builder()
         .orientation(Orientation::Vertical)
-        .spacing(2)
+        .spacing(4)
         .build();
+    outer.append(&section_title("Better at chess?"));
 
-    let improving = transfer.improvement() >= 0.0;
-    let headline = Label::builder()
-        .label(format!(
-            "{}–{}   {:.0}% {}",
-            transfer.band,
-            transfer.band + 99,
-            transfer.improvement().abs() * 100.0,
-            if improving { "faster" } else { "slower" }
-        ))
-        .halign(Align::Start)
-        .build();
-    headline.add_css_class("title-2");
-    headline.add_css_class("omachess-change");
-    headline.add_css_class(if improving { "improving" } else { "slowing" });
+    // The band with the most first encounters leads: it is the one carrying the
+    // most evidence, whichever way it points.
+    let leading = transfer.iter().max_by_key(|t| t.seen);
+    let Some(lead) = leading else {
+        let figure = Label::builder().label("—").halign(Align::Start).build();
+        figure.add_css_class("omachess-hero");
+        outer.append(&figure);
+        outer.append(&caption(&format!(
+            "Needs {MIN_TRANSFER} unseen puzzles in one band."
+        )));
+        return outer;
+    };
 
-    let detail = Label::builder()
-        .label(format!(
-            "{:.1}s → {:.1}s on {} unseen puzzles solved · accuracy {:.0}% → {:.0}% over {} seen\n{}",
-            transfer.earlier_seconds,
-            transfer.later_seconds,
-            transfer.solved,
-            transfer.earlier_accuracy * 100.0,
-            transfer.later_accuracy * 100.0,
-            transfer.seen,
-            if transfer.is_speed_accuracy_tradeoff() {
-                format!(
-                    "Faster, but you are getting more of them wrong — speed bought by guessing, \
-                     not earned. Slow down until accuracy recovers. (p = {:.3})",
-                    transfer.p_value
-                )
-            } else if transfer.is_significant() {
-                format!("Unlikely to be chance (p = {:.3}).", transfer.p_value)
+    // A result that could be chance is not a result. Saying so in the figure
+    // rather than in a footnote is the difference between a measurement and a
+    // number that flatters.
+    let proven = transfer.iter().find(|t| t.is_significant());
+    let (text, class) = match proven {
+        Some(t) => (
+            format!("{:.0}% {}", t.improvement().abs() * 100.0, direction(t)),
+            if t.improvement() >= 0.0 {
+                "improving"
             } else {
-                format!("Not yet distinguishable from chance (p = {:.3}).", transfer.p_value)
-            }
-        ))
-        .halign(Align::Start)
-        .wrap(true)
-        .max_width_chars(74)
-        .build();
-    detail.add_css_class("dim-label");
+                "slowing"
+            },
+        ),
+        None => ("Not proven yet".to_owned(), "dim-label"),
+    };
+    let figure = Label::builder().label(&text).halign(Align::Start).build();
+    figure.add_css_class("omachess-hero");
+    figure.add_css_class(class);
+    outer.append(&figure);
+    let _ = lead;
 
-    outer.append(&headline);
-    outer.append(&detail);
+    // Ascending, so the bands read the way a player thinks of them.
+    let mut ordered: Vec<&Transfer> = transfer.iter().collect();
+    ordered.sort_by_key(|t| t.band);
+    for t in ordered {
+        outer.append(&stat_line(&format!(
+            "{}–{}   {:.0}% {}   p {:.2}   n {}",
+            t.band,
+            t.band + 99,
+            t.improvement().abs() * 100.0,
+            direction(t),
+            t.p_value,
+            t.seen
+        )));
+    }
     outer
 }
 
-/// One recurring weakness, with the evidence beside it.
-fn weakness_row(weakness: &Weakness, baseline: f64) -> Label {
-    let label = Label::builder()
-        .label(format!(
-            "{:<16} {:>3.0}%  over {:>3} attempts   {:.0} points below your {:.0}% average",
-            weakness.theme,
-            weakness.success * 100.0,
-            weakness.attempts,
-            (baseline - weakness.success) * 100.0,
-            baseline * 100.0
-        ))
-        .halign(Align::Start)
+fn direction(t: &Transfer) -> &'static str {
+    if t.improvement() >= 0.0 {
+        "faster"
+    } else {
+        "slower"
+    }
+}
+
+/// The headline numbers, side by side.
+fn tiles(data: &ProgressData) -> GtkBox {
+    let row = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(28)
         .build();
-    label.add_css_class("monospace");
+    row.append(&tile("Solved", &data.solved.to_string(), None));
+    row.append(&tile("Attempts", &data.ratings.len().to_string(), None));
+    row.append(&tile(
+        "Accuracy",
+        &format!("{:.0}%", data.baseline_success * 100.0),
+        None,
+    ));
+    let now = data.ratings.last().copied().unwrap_or(0.0);
+    let first = data.ratings.first().copied().unwrap_or(0.0);
+    let delta = now - first;
+    row.append(&tile(
+        "Rating",
+        &format!("{now:.0}"),
+        (data.ratings.len() >= 2).then(|| format!("{:+.0}", delta)),
+    ));
+    row
+}
+
+fn tile(name: &str, value: &str, delta: Option<String>) -> GtkBox {
+    let cell = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(1)
+        .build();
+    let label = Label::builder().label(name).halign(Align::Start).build();
+    label.add_css_class("dim-label");
+    label.add_css_class("omachess-tile-label");
+    let figure = Label::builder().label(value).halign(Align::Start).build();
+    figure.add_css_class("omachess-tile");
+    cell.append(&label);
+    cell.append(&figure);
+    if let Some(delta) = delta {
+        let change = Label::builder().label(&delta).halign(Align::Start).build();
+        change.add_css_class("omachess-tile-label");
+        change.add_css_class(if delta.starts_with('-') {
+            "slowing"
+        } else {
+            "improving"
+        });
+        cell.append(&change);
+    }
+    cell
+}
+
+/// One line of numbers, monospaced so columns line up down the page.
+fn stat_line(text: &str) -> Label {
+    let label = Label::builder().label(text).halign(Align::Start).build();
+    label.add_css_class("omachess-stat");
     label
+}
+
+/// What is not measurable yet, as counters rather than paragraphs.
+///
+/// "Needs twelve first encounters within a single rating band before the
+/// earlier and later halves can be compared" is a sentence. "4 / 12" is the
+/// same fact, and it tells you how close you are.
+fn pending_rows(data: &ProgressData) -> Vec<String> {
+    let mut rows = Vec::new();
+    if data.overall.is_none() {
+        rows.push(format!(
+            "Repeats           {} / {} pairs",
+            data.slopes.len(),
+            MIN_PAIRS
+        ));
+    }
+    if data.ratings.len() < MIN_RATING_POINTS {
+        rows.push(format!(
+            "Rating trend      {} / {MIN_RATING_POINTS} attempts",
+            data.ratings.len()
+        ));
+    }
+    if data.themes.len() < 3 {
+        rows.push(format!(
+            "Themes            {} / 3 at {MIN_THEME_ATTEMPTS} attempts",
+            data.themes.len()
+        ));
+    }
+    if data.transfer.is_empty() {
+        rows.push(format!("Unseen puzzles    0 / {MIN_TRANSFER} in one band"));
+    }
+    rows
 }
 
 /// One opening's record.
@@ -426,33 +386,11 @@ fn endgame_row(record: &EndgameRecord) -> GtkBox {
     row
 }
 
-/// A blunder rate this many times higher on a low clock is worth naming as
-/// the thing deciding games; below it, saying so would be reading noise.
-const PRESSURE_ALARMING: f64 = 1.5;
-/// And below this the clock is demonstrably not the problem.
-const PRESSURE_HARMLESS: f64 = 0.75;
-
 /// Par in an opening is half a point a game. These are the distances from par
 /// worth colouring rather than leaving to be read off the number.
 const OPENING_POOR: f64 = 0.4;
 const OPENING_GOOD: f64 = 0.6;
 
-fn pressure_verdict(multiplier: f64) -> String {
-    if multiplier >= PRESSURE_ALARMING {
-        format!(
-            "{multiplier:.1}x more often when the clock is low. This is where your games \
-             are decided — practise moving before it gets here."
-        )
-    } else if multiplier <= PRESSURE_HARMLESS {
-        format!("{multiplier:.1}x — a low clock is not what costs you.")
-    } else {
-        "About the same either way; the clock is not the cause.".to_owned()
-    }
-}
-
-fn pressure_class(multiplier: f64) -> Option<&'static str> {
-    (multiplier >= PRESSURE_ALARMING).then_some("error")
-}
 
 fn opening_class(score: f64) -> Option<&'static str> {
     if score < OPENING_POOR {
@@ -472,46 +410,6 @@ fn efficiency_text(best: Option<u32>, optimal: Option<u32>) -> String {
     }
 }
 
-/// One item of today's session: what to do, how long, and the number that put
-/// it there.
-fn plan_row(position: usize, step: &Step) -> GtkBox {
-    let row = GtkBox::builder()
-        .orientation(Orientation::Vertical)
-        .spacing(2)
-        .build();
-
-    let heading = GtkBox::builder()
-        .orientation(Orientation::Horizontal)
-        .spacing(8)
-        .build();
-    let title = Label::builder()
-        .label(format!("{position}. {}", step.headline()))
-        .halign(Align::Start)
-        .hexpand(true)
-        .wrap(true)
-        .build();
-    title.add_css_class("heading");
-    heading.append(&title);
-    let minutes = Label::builder()
-        .label(format!("{} min", step.minutes))
-        .halign(Align::End)
-        .build();
-    minutes.add_css_class("dim-label");
-    heading.append(&minutes);
-    row.append(&heading);
-
-    // The reason is the point: without it this is a list of chores.
-    let why = Label::builder()
-        .label(&step.why)
-        .halign(Align::Start)
-        .wrap(true)
-        .max_width_chars(72)
-        .build();
-    why.add_css_class("dim-label");
-    row.append(&why);
-    row
-}
-
 fn section_title(text: &str) -> Label {
     let label = Label::builder().label(text).halign(Align::Start).build();
     label.add_css_class("title-4");
@@ -529,146 +427,8 @@ fn caption(text: &str) -> Label {
     label
 }
 
-fn empty_state(solved: u64, repeat_mode: bool) -> GtkBox {
-    let outer = GtkBox::builder()
-        .orientation(Orientation::Vertical)
-        .spacing(10)
-        .build();
 
-    let title = Label::builder().label("Nothing measured yet").build();
-    title.add_css_class("title-2");
-    title.set_halign(Align::Start);
 
-    let body = Label::builder()
-        .label(format!(
-            "You have solved {solved} puzzle{}.\n\n\
-             Solving new puzzles builds your repertoire, but it cannot measure \
-             progress — a puzzle you have never seen has nothing to compare against.\n\n\
-             {}",
-            if solved == 1 { "" } else { "s" },
-            if repeat_mode {
-                "Repeat is on — keep going. Five repeated puzzles are needed before anything \
-                 is claimed."
-            } else {
-                "Turn on Repeat in the Train tab. It serves back puzzles you have already \
-                 solved, and each one is then timed against your own first solve of it."
-            }
-        ))
-        .justify(gtk4::Justification::Left)
-        .wrap(true)
-        .max_width_chars(58)
-        .build();
-    body.add_css_class("dim-label");
-
-    outer.append(&title);
-    outer.append(&body);
-    outer
-}
-
-fn headline(result: &Improvement) -> GtkBox {
-    let outer = GtkBox::builder()
-        .orientation(Orientation::Vertical)
-        .spacing(4)
-        .build();
-
-    let improving = result.median_speedup >= 1.0;
-    let percent = ((result.median_speedup - 1.0) * 100.0).abs();
-
-    let value = Label::builder()
-        .label(format!(
-            "{percent:.0}% {}",
-            if improving { "faster" } else { "slower" }
-        ))
-        .halign(Align::Start)
-        .build();
-    value.add_css_class("title-1");
-    value.add_css_class(if improving { "improving" } else { "slowing" });
-    value.add_css_class("omachess-change");
-
-    let basis = Label::builder()
-        .label(format!(
-            "median across {} puzzle{} you had already solved · {:.1}s → {:.1}s",
-            result.puzzles,
-            if result.puzzles == 1 { "" } else { "s" },
-            seconds(result.median_first),
-            seconds(result.median_latest),
-        ))
-        .halign(Align::Start)
-        .build();
-    basis.add_css_class("dim-label");
-
-    outer.append(&value);
-    outer.append(&basis);
-    outer
-}
-
-fn verdict(result: &Improvement) -> Label {
-    // The counts and the probability are stated plainly, because "faster" on
-    // its own is a claim and this is the evidence for it.
-    let text = format!(
-        "{} faster, {} slower, {} unchanged.\n{}",
-        result.faster,
-        result.slower,
-        result.unchanged,
-        if result.is_significant() && result.median_speedup >= 1.0 {
-            format!(
-                "Unlikely to be chance (p = {:.3}, below the {SIGNIFICANT} threshold).",
-                result.p_value
-            )
-        } else {
-            format!(
-                "Not yet distinguishable from chance (p = {:.3}). Repeat more puzzles.",
-                result.p_value
-            )
-        }
-    );
-    let label = Label::builder()
-        .label(text)
-        .halign(Align::Start)
-        .wrap(true)
-        .build();
-    label.add_css_class("dim-label");
-    label
-}
-
-fn band_row(band: u32, result: &Improvement) -> Label {
-    let improving = result.median_speedup >= 1.0;
-    let percent = ((result.median_speedup - 1.0) * 100.0).abs();
-    let label = Label::builder()
-        .label(format!(
-            "{band}–{}   {:.1}s → {:.1}s   {percent:.0}% {}   ({} puzzles, p = {:.3})",
-            band + 99,
-            seconds(result.median_first),
-            seconds(result.median_latest),
-            if improving { "faster" } else { "slower" },
-            result.puzzles,
-            result.p_value,
-        ))
-        .halign(Align::Start)
-        .build();
-    label.add_css_class("monospace");
-    label
-}
-
-fn method_note() -> Label {
-    let label = Label::builder()
-        .label(
-            "Each puzzle is compared only against itself, so puzzle difficulty \
-             cannot masquerade as progress. Only correct solves are timed, and \
-             the probability is a one-sided sign test over how many puzzles \
-             improved.",
-        )
-        .halign(Align::Start)
-        .wrap(true)
-        .max_width_chars(70)
-        .build();
-    label.add_css_class("dim-label");
-    label
-}
-
-fn seconds(span: chrono::Duration) -> f64 {
-    span.num_milliseconds() as f64 / 1000.0
-}
 
 /// How the engine games have gone, which is a separate question from how the
 /// puzzles have gone and is held to a weaker standard of evidence.
@@ -735,32 +495,6 @@ fn play_section(trend: Option<&PlayTrend>, games: usize) -> GtkBox {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The pressure verdict is the page's strongest claim — it tells the
-    /// player where their games are decided — so the point at which it starts
-    /// making that claim has to be deliberate rather than incidental.
-    #[test]
-    fn the_clock_is_only_blamed_once_the_difference_is_real() {
-        // Well above: named as the thing deciding games, and coloured.
-        let loud = pressure_verdict(3.0);
-        assert!(loud.contains("3.0x"), "{loud}");
-        assert!(loud.contains("where your games are decided"), "{loud}");
-        assert_eq!(pressure_class(3.0), Some("error"));
-
-        // Just at the threshold still counts.
-        assert_eq!(pressure_class(PRESSURE_ALARMING), Some("error"));
-
-        // In between: explicitly says the clock is not the cause, and is not
-        // coloured as a problem.
-        let middling = pressure_verdict(1.1);
-        assert!(middling.contains("not the cause"), "{middling}");
-        assert_eq!(pressure_class(1.1), None);
-
-        // Below: the clock is demonstrably not the problem.
-        let calm = pressure_verdict(0.5);
-        assert!(calm.contains("not what costs you"), "{calm}");
-        assert_eq!(pressure_class(0.5), None);
-    }
 
     /// Par is half a point a game, and an opening at par should read as
     /// neither a success nor a failure.

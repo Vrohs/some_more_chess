@@ -141,6 +141,29 @@ const DEFAULT_CSS: &str = r#"
     font-feature-settings: "tnum";
 }
 .omachess-clock.error { color: @error_color; font-weight: bold; }
+/* The one figure the page leads with. Large, and in the same face as
+   everything else: a display face on a hero number reads as decoration.
+   Proportional figures deliberately — tabular ones make a three-digit number
+   look loose at this size. */
+.omachess-hero {
+    font-size: 44px;
+    font-weight: 600;
+}
+/* The headline numbers beside it. */
+.omachess-tile {
+    font-size: 26px;
+    font-weight: 600;
+}
+.omachess-tile-label {
+    font-size: 11px;
+}
+/* Rows of figures, monospaced with tabular digits so the columns line up down
+   the page rather than drifting with the width of a 1. */
+.omachess-stat {
+    font-family: monospace;
+    font-feature-settings: "tnum";
+    font-size: 13px;
+}
 /* The sparkline reads its stroke colour from CSS, so the chart stays on the
    Omarchy palette even though the board no longer does. */
 .omachess-spark { color: @accent_color; }

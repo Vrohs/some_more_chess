@@ -389,6 +389,82 @@ pub fn accuracy_values(points: &[GamePoint]) -> Vec<f64> {
     points.iter().map(|p| p.accuracy).collect()
 }
 
+/// Themes as horizontal bars, worst first, against your own average.
+///
+/// Horizontal because the categories are words rather than dates, and words
+/// read along a bar and not under one. One colour for every bar: the categories
+/// have no order of their own, so shading them by value would spend the only
+/// free channel restating the length. What separates a weakness from a bad run
+/// is the hairline at your own average, not a hue.
+pub fn bar_chart(rows: Vec<(String, f64, u32)>, baseline: f64) -> DrawingArea {
+    const ROW: f64 = 26.0;
+    const GAP: f64 = 6.0;
+    const NAMES: f64 = 108.0;
+    const VALUES: f64 = 62.0;
+
+    let area = DrawingArea::builder()
+        .content_height((rows.len() as f64 * (ROW + GAP)) as i32 + 26)
+        .hexpand(true)
+        .build();
+    area.add_css_class("omachess-spark");
+
+    area.set_draw_func(move |area, cr, width, _height| {
+        let ink = ink(area);
+        let w = f64::from(width);
+        let left = NAMES;
+        let right = w - VALUES;
+        if right <= left || rows.is_empty() {
+            return;
+        }
+        let span = right - left;
+        cr.set_font_size(11.0);
+
+        for (index, (name, rate, attempts)) in rows.iter().enumerate() {
+            let y = index as f64 * (ROW + GAP) + 4.0;
+            let mid = y + ROW / 2.0 + 4.0;
+
+            set(cr, ink, 0.85);
+            label(cr, 0.0, mid, name, 11.0);
+
+            // The track, so a short bar still reads as a share of something.
+            set(cr, ink, 0.10);
+            cr.rectangle(left, y, span, ROW - 8.0);
+            let _ = cr.fill();
+
+            set(cr, ink, 0.62);
+            cr.rectangle(left, y, span * rate.clamp(0.0, 1.0), ROW - 8.0);
+            let _ = cr.fill();
+
+            set(cr, ink, 0.85);
+            label(
+                cr,
+                right + 8.0,
+                mid,
+                &format!("{:.0}%  n{attempts}", rate * 100.0),
+                11.0,
+            );
+        }
+
+        // Your own average, as a hairline across every bar.
+        let x = left + span * baseline.clamp(0.0, 1.0);
+        set(cr, ink, 0.55);
+        cr.set_line_width(1.0);
+        cr.move_to(x, 0.0);
+        cr.line_to(x, rows.len() as f64 * (ROW + GAP));
+        let _ = cr.stroke();
+        set(cr, ink, 0.7);
+        label(
+            cr,
+            (x - 14.0).max(left),
+            rows.len() as f64 * (ROW + GAP) + 14.0,
+            &format!("{:.0}%", baseline * 100.0),
+            10.0,
+        );
+    });
+
+    area
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
