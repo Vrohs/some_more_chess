@@ -9,7 +9,7 @@ use omachess_core::grade::RATING_FLOOR;
 use omachess_core::ingest::ingest_csv;
 use omachess_core::progress::{measured_improvement, MIN_PAIRS};
 use omachess_core::session::{Session, Solve};
-use omachess_core::store::Store;
+use omachess_core::store::{DrillOrigin, Store};
 use rs_fsrs::Rating;
 
 const CSV: &str = "\
@@ -372,6 +372,7 @@ fn another_players_import_is_never_counted_as_your_play() {
     use omachess_core::store::{GameRecord, PhaseLoss};
 
     let game = |owner: &str, source: &str, day: i64| GameRecord {
+        moves_uci: String::new(),
         played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap() + Duration::days(day),
         player_white: true,
         opponent_elo: 1320,
@@ -419,6 +420,7 @@ fn the_duplicate_check_is_scoped_to_the_player() {
     store.set_setting("player_name", "vrohs").unwrap();
     store
         .record_game(&GameRecord {
+        moves_uci: String::new(),
             played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap(),
             player_white: true,
             opponent_elo: 1320,
@@ -501,6 +503,7 @@ fn openings_are_reported_worst_first_and_only_once_there_is_a_sample() {
     use omachess_core::store::{GameRecord, PhaseLoss};
 
     let game = |opening: &str, result: &str, day: i64| GameRecord {
+        moves_uci: String::new(),
         played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap() + Duration::days(day),
         player_white: true,
         opponent_elo: 1320,
@@ -570,6 +573,7 @@ fn time_pressure_is_measured_only_where_there_was_a_clock() {
     let game =
         |control: &str, moves: u32, blunders: u32, p_moves: u32, p_blunders: u32, day: i64| {
             GameRecord {
+        moves_uci: String::new(),
                 played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap()
                     + Duration::days(day),
                 player_white: true,
@@ -636,6 +640,7 @@ fn only_losing_openings_are_offered_for_drilling() {
     use omachess_core::store::{GameRecord, PhaseLoss};
 
     let game = |opening: &str, result: &str, day: i64| GameRecord {
+        moves_uci: String::new(),
         played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap() + Duration::days(day),
         player_white: true,
         opponent_elo: 1320,
@@ -1010,14 +1015,18 @@ fn mastered_positions_leave_the_drill_pool_and_come_back_if_lost() {
         store
             .record_drill_origin(
                 id,
-                "https://lichess.org/g",
-                base,
-                40,
-                "Qh1",
-                "Qg3",
-                lost,
-                "middlegame",
-                0.8,
+                &DrillOrigin {
+                    source: "https://lichess.org/g".to_string(),
+                    played_at: base,
+                    ply: 40,
+                    played: "Qh1".to_string(),
+                    best: "Qg3".to_string(),
+                    lost,
+                    phase: "middlegame".to_string(),
+                    win_before: 0.8,
+                    best_line: Vec::new(),
+                    game_id: None,
+                },
             )
             .unwrap();
     };
@@ -1078,32 +1087,40 @@ fn another_players_drill_positions_are_not_offered_as_yours() {
     store.set_setting("player_name", "vrohs").unwrap();
     store
         .record_drill_origin(
-            "mine",
-            "https://lichess.org/a",
-            base,
-            40,
-            "Qh1",
-            "Qg3",
-            0.9,
-            "middlegame",
-            0.8,
-        )
+                "mine",
+                &DrillOrigin {
+                    source: "https://lichess.org/a".to_string(),
+                    played_at: base,
+                    ply: 40,
+                    played: "Qh1".to_string(),
+                    best: "Qg3".to_string(),
+                    lost: 0.9,
+                    phase: "middlegame".to_string(),
+                    win_before: 0.8,
+                    best_line: Vec::new(),
+                    game_id: None,
+                },
+            )
         .unwrap();
 
     // A second profile imports their own export into the same database.
     store.set_setting("player_name", "someone_else").unwrap();
     store
         .record_drill_origin(
-            "theirs",
-            "https://lichess.org/b",
-            base,
-            20,
-            "Nf3",
-            "Bc4",
-            0.95,
-            "opening",
-            0.7,
-        )
+                "theirs",
+                &DrillOrigin {
+                    source: "https://lichess.org/b".to_string(),
+                    played_at: base,
+                    ply: 20,
+                    played: "Nf3".to_string(),
+                    best: "Bc4".to_string(),
+                    lost: 0.95,
+                    phase: "opening".to_string(),
+                    win_before: 0.7,
+                    best_line: Vec::new(),
+                    game_id: None,
+                },
+            )
         .unwrap();
 
     let offered: Vec<String> = store
@@ -1135,6 +1152,7 @@ fn forgetting_imported_games_takes_their_positions_with_them() {
     store.set_setting("player_name", "vrohs").unwrap();
     store
         .record_game(&GameRecord {
+        moves_uci: String::new(),
             played_at: base,
             player_white: true,
             opponent_elo: 1320,
@@ -1157,21 +1175,39 @@ fn forgetting_imported_games_takes_their_positions_with_them() {
         .unwrap();
     store
         .record_drill_origin(
-            "from-import",
-            "https://lichess.org/a",
-            base,
-            40,
-            "Qh1",
-            "Qg3",
-            0.9,
-            "middlegame",
-            0.8,
-        )
+                "from-import",
+                &DrillOrigin {
+                    source: "https://lichess.org/a".to_string(),
+                    played_at: base,
+                    ply: 40,
+                    played: "Qh1".to_string(),
+                    best: "Qg3".to_string(),
+                    lost: 0.9,
+                    phase: "middlegame".to_string(),
+                    win_before: 0.8,
+                    best_line: Vec::new(),
+                    game_id: None,
+                },
+            )
         .unwrap();
     // One from a game played in the application, which has no source and must
     // survive: it was never part of the import.
     store
-        .record_drill_origin("from-here", "", base, 30, "Nf3", "Bc4", 0.5, "opening", 0.6)
+        .record_drill_origin(
+                "from-here",
+                &DrillOrigin {
+                    source: "".to_string(),
+                    played_at: base,
+                    ply: 30,
+                    played: "Nf3".to_string(),
+                    best: "Bc4".to_string(),
+                    lost: 0.5,
+                    phase: "opening".to_string(),
+                    win_before: 0.6,
+                    best_line: Vec::new(),
+                    game_id: None,
+                },
+            )
         .unwrap();
 
     assert_eq!(store.drills_to_play(10).unwrap().len(), 2);

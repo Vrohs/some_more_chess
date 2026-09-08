@@ -25,7 +25,7 @@ use omachess_core::puzzle::Puzzle;
 use omachess_core::review::{
     describe_move, puzzle_from, stable_puzzle_id, time_pressure, GameAnalysis, MoveAnalysis,
 };
-use omachess_core::store::Store;
+use omachess_core::store::{DrillOrigin, Store};
 use shakmaty::{Color, Move, Position, Square};
 use std::time::Instant;
 
@@ -1441,6 +1441,13 @@ impl PlayView {
             .unwrap_or_default();
 
         let record = omachess_core::store::GameRecord {
+            moves_uci: {
+                let guard = self.game.borrow();
+                guard
+                    .as_ref()
+                    .map(|game| game.moves().join(" "))
+                    .unwrap_or_default()
+            },
             time_control,
             pressure_moves,
             pressure_blunders,
@@ -1597,14 +1604,18 @@ impl PlayView {
         for review in &reviews {
             if let Err(e) = store.record_drill_origin(
                 &stable_puzzle_id(review),
-                "",
-                now,
-                review.ply as u32,
-                &describe_move(review, &review.played),
-                &describe_move(review, &review.best),
-                review.lost(),
-                review.phase.theme(),
-                review.win_before,
+                &DrillOrigin {
+                    source: "".to_string(),
+                    played_at: now,
+                    ply: review.ply as u32,
+                    played: describe_move(review, &review.played).to_string(),
+                    best: describe_move(review, &review.best).to_string(),
+                    lost: review.lost(),
+                    phase: review.phase.theme().to_string(),
+                    win_before: review.win_before,
+                    best_line: Vec::new(),
+                    game_id: None,
+                },
             ) {
                 omachess_core::diagnostics::record_error("play::record_drill_origin", e);
             }

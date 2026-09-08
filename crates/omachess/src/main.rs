@@ -696,21 +696,22 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
                     review.lost(),
                     review.phase.theme(),
                     review.win_before,
+                    review.best_line.clone(),
                 )
             })
             .collect();
         drop(drillable);
         learned += own.len();
         store.insert_puzzles(&own)?;
-        for (id, ply, played, best, lost, phase, win_before) in origins {
-            store.record_drill_origin(
-                &id, &source, played_at, ply, &played, &best, lost, phase, win_before,
-            )?;
-        }
 
         let opening = omachess_core::openings::identify(&game.moves);
         let counts = analysis.counts();
-        store.record_game(&GameRecord {
+        // The game goes in first so the positions taken out of it can point at
+        // it, which is what makes them navigable rather than free-floating.
+        let game_id = store.record_game(&GameRecord {
+            // The game itself, so a position taken out of it can be shown in
+            // the moves that led to it rather than dropped on the board alone.
+            moves_uci: game.moves.join(" "),
             player: player.clone(),
             // A PGN export carries clock times, but not in a form this reads
             // yet, so an imported game claims no time-pressure record rather
@@ -730,7 +731,7 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
             blunders: counts.blunders as u32,
             mistakes: counts.mistakes as u32,
             inaccuracies: counts.inaccuracies as u32,
-            source,
+            source: source.clone(),
             phases: {
                 use omachess_core::review::Phase;
                 use omachess_core::store::PhaseLoss;
@@ -747,6 +748,24 @@ fn command_import_pgn(path: Option<PathBuf>, name: Option<&String>) -> anyhow::R
                 })
             },
         })?;
+
+        for (id, ply, played, best, lost, phase, win_before, best_line) in origins {
+            store.record_drill_origin(
+                &id,
+                &omachess_core::store::DrillOrigin {
+                    source: source.clone(),
+                    played_at,
+                    ply,
+                    played,
+                    best,
+                    lost,
+                    phase: phase.to_string(),
+                    win_before,
+                    best_line,
+                    game_id: Some(game_id),
+                },
+            )?;
+        }
         imported += 1;
     }
     println!("\rimported {imported}, already present {skipped}, unreadable {failed}          ");

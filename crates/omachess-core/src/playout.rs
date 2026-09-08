@@ -129,6 +129,8 @@ mod tests {
 
     fn origin(win_before: f64, lost: f64) -> DrillOrigin {
         DrillOrigin {
+            best_line: Vec::new(),
+            game_id: None,
             source: "https://lichess.org/x".into(),
             played_at: Utc.with_ymd_and_hms(2026, 8, 21, 12, 0, 0).unwrap(),
             ply: 40,

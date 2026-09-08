@@ -257,16 +257,20 @@ mod tests {
         for i in 0..n {
             store
                 .record_drill_origin(
-                    &format!("d{i}"),
-                    "https://lichess.org/g",
-                    base,
-                    40,
-                    "Qh1",
-                    "Qg3",
-                    0.9 - f64::from(i) * 0.01,
-                    "middlegame",
-                    0.8,
-                )
+                &format!("d{i}"),
+                &DrillOrigin {
+                    source: "https://lichess.org/g".to_string(),
+                    played_at: base,
+                    ply: 40,
+                    played: "Qh1".to_string(),
+                    best: "Qg3".to_string(),
+                    lost: 0.9 - f64::from(i) * 0.01,
+                    phase: "middlegame".to_string(),
+                    win_before: 0.8,
+                    best_line: Vec::new(),
+                    game_id: None,
+                },
+            )
                 .unwrap();
         }
         store
@@ -364,6 +368,7 @@ mod tests {
         for (i, result) in ["lost", "lost", "lost", "won"].iter().enumerate() {
             store
                 .record_game(&GameRecord {
+                moves_uci: String::new(),
                     played_at: base + Duration::days(i as i64),
                     player_white: true,
                     opponent_elo: 1320,

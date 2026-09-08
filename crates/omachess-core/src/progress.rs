@@ -397,6 +397,7 @@ mod game_tests {
 
     fn game(index: i64, accuracy: f64, blunders: u32) -> GameRecord {
         GameRecord {
+            moves_uci: String::new(),
             played_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap()
                 + chrono::Duration::days(index),
             player_white: true,

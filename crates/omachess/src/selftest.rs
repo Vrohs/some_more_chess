@@ -15,7 +15,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use omachess_core::store::Store;
+use omachess_core::store::{DrillOrigin, Store};
 use shakmaty::Square;
 
 use crate::drill_view::DrillView;
@@ -205,16 +205,20 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
             // A position taken from a game: White to move, Rb1-b8 mates.
             store
                 .record_drill_origin(
-                    "selftst1",
-                    "https://lichess.org/a",
-                    chrono::Utc::now(),
-                    40,
-                    "Kh8",
-                    "Rb8",
-                    0.9,
-                    "middlegame",
-                    0.85,
-                )
+                "selftst1",
+                &DrillOrigin {
+                    source: "https://lichess.org/a".to_string(),
+                    played_at: chrono::Utc::now(),
+                    ply: 40,
+                    played: "Kh8".to_string(),
+                    best: "Rb8".to_string(),
+                    lost: 0.9,
+                    phase: "middlegame".to_string(),
+                    win_before: 0.85,
+                    best_line: Vec::new(),
+                    game_id: None,
+                },
+            )
                 .map_err(|e| e.to_string())?;
         }
         let drills = DrillView::new(store.clone(), pieces.clone(), None);
@@ -339,14 +343,18 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
             .borrow()
             .record_drill_origin(
                 "selftst1",
-                "https://lichess.org/a",
-                chrono::Utc::now(),
-                40,
-                "Kh8",
-                "Rb8",
-                0.9,
-                "middlegame",
-                0.85,
+                &DrillOrigin {
+                    source: "https://lichess.org/a".to_string(),
+                    played_at: chrono::Utc::now(),
+                    ply: 40,
+                    played: "Kh8".to_string(),
+                    best: "Rb8".to_string(),
+                    lost: 0.9,
+                    phase: "middlegame".to_string(),
+                    win_before: 0.85,
+                    best_line: Vec::new(),
+                    game_id: None,
+                },
             )
             .map_err(|e| e.to_string())?;
         let drills = DrillView::new(store, pieces.clone(), None);
@@ -373,14 +381,18 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
             .borrow()
             .record_drill_origin(
                 "selftst1",
-                "https://lichess.org/a",
-                chrono::Utc::now(),
-                40,
-                "Kh8",
-                "Rb8",
-                0.9,
-                "middlegame",
-                0.85,
+                &DrillOrigin {
+                    source: "https://lichess.org/a".to_string(),
+                    played_at: chrono::Utc::now(),
+                    ply: 40,
+                    played: "Kh8".to_string(),
+                    best: "Rb8".to_string(),
+                    lost: 0.9,
+                    phase: "middlegame".to_string(),
+                    win_before: 0.85,
+                    best_line: Vec::new(),
+                    game_id: None,
+                },
             )
             .map_err(|e| e.to_string())?;
         let drills = DrillView::new(store, pieces.clone(), None);

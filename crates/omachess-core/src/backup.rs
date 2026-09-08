@@ -14,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::store::{AttemptRecord, GameRecord, Store};
+use crate::store::{AttemptRecord, DrillOrigin, GameRecord, Store};
 
 /// Bumped only if the shape changes in a way an older reader cannot handle.
 pub const FORMAT_VERSION: u32 = 1;
@@ -56,6 +56,9 @@ pub struct DrillRow {
     pub lost: f64,
     pub phase: String,
     pub win_before: f64,
+    /// The engine's line, absent in backups written before it was kept.
+    #[serde(default)]
+    pub best_line: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -119,6 +122,11 @@ pub struct GameRow {
     pub opening: String,
     #[serde(default)]
     pub book_plies: u32,
+    /// The game's own moves, absent in backups written before games kept them.
+    /// A restore of one of those loses nothing it ever had; the positions taken
+    /// out of it simply cannot be shown in context.
+    #[serde(default)]
+    pub moves_uci: String,
     /// How the game was timed and how it went on a low clock, absent in older
     /// backups.
     #[serde(default)]
@@ -155,6 +163,7 @@ pub fn export(store: &Store) -> Result<String> {
             .games()?
             .into_iter()
             .map(|g| GameRow {
+                moves_uci: g.moves_uci,
                 player: g.player,
                 opening: g.opening,
                 book_plies: g.book_plies,
@@ -244,14 +253,20 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
     for drill in &backup.drill_positions {
         store.record_drill_origin(
             &drill.puzzle_id,
-            &drill.source,
-            drill.played_at,
-            drill.ply,
-            &drill.played,
-            &drill.best,
-            drill.lost,
-            &drill.phase,
-            drill.win_before,
+            &DrillOrigin {
+                source: drill.source.clone(),
+                played_at: drill.played_at,
+                ply: drill.ply,
+                played: drill.played.clone(),
+                best: drill.best.clone(),
+                lost: drill.lost,
+                phase: drill.phase.clone(),
+                win_before: drill.win_before,
+                best_line: drill.best_line.clone(),
+                // A restored position points at no game in this database: the
+                // game it came from is somewhere else, or nowhere.
+                game_id: None,
+            },
         )?;
         report.drills_written += 1;
     }
@@ -287,6 +302,7 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
             time_control: game.time_control.clone(),
             pressure_moves: game.pressure_moves,
             pressure_blunders: game.pressure_blunders,
+            moves_uci: game.moves_uci.clone(),
             played_at: game.played_at,
             player_white: game.player_white,
             opponent_elo: game.opponent_elo,
@@ -349,6 +365,7 @@ mod tests {
         store.set_repeat_mode(true).unwrap();
         store
             .record_game(&GameRecord {
+                moves_uci: String::new(),
                 time_control: String::new(),
                 pressure_moves: 0,
                 pressure_blunders: 0,

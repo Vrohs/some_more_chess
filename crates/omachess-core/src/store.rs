@@ -254,6 +254,10 @@ pub struct GameRecord {
     /// The most specific named opening the game reached, empty when it left
     /// book immediately or the book has no name for it.
     pub opening: String,
+    /// The game itself, as space-separated UCI. Without it a game is its own
+    /// statistics and nothing else, and a position taken out of it cannot be
+    /// shown in the context it arose from.
+    pub moves_uci: String,
     /// How many plies followed that named line.
     pub book_plies: u32,
     /// The time control played, empty for an untimed game.
@@ -301,6 +305,11 @@ pub struct AttemptRecord {
     pub index_in_session: u32,
 }
 
+/// A stored line back into moves. Empty text is no line, not one empty move.
+fn split_line(raw: String) -> Vec<String> {
+    raw.split_whitespace().map(str::to_owned).collect()
+}
+
 /// Where a drill position was taken from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrillOrigin {
@@ -318,6 +327,14 @@ pub struct DrillOrigin {
     /// Win probability before the mistake, from the player's side. -1 for
     /// positions recorded before this was kept.
     pub win_before: f64,
+    /// The engine's line out of the position, in UCI. Empty for rows written
+    /// before it was kept: the answer is then a single move with nothing to
+    /// walk, which is what it used to be for every row.
+    pub best_line: Vec<String>,
+    /// The game this came from, when it is one this database recorded. `None`
+    /// for imported games and for anything stored before games kept their
+    /// moves — the exercise then has no context to step back through.
+    pub game_id: Option<i64>,
 }
 
 pub struct Store {
@@ -360,7 +377,7 @@ impl Store {
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as u32;
 
         // Steps are appended here and never renumbered or edited once shipped.
-        let steps: [&str; 8] = [
+        let steps: [&str; 9] = [
             // Imported games need an identity of their own so a re-import does
             // not duplicate them; games played in the app leave it empty.
             "ALTER TABLE games ADD COLUMN source TEXT NOT NULL DEFAULT ''",
@@ -407,6 +424,21 @@ impl Store {
              UPDATE drill_positions SET player =
                  COALESCE((SELECT value FROM settings WHERE key = 'player_name'), '')
              WHERE player = ''",
+            // The moves of the game, and the engine's line out of the mistake.
+            //
+            // Neither was kept. A game was stored as its statistics alone, so
+            // there was no way to step back and see how a position arose; and a
+            // drill puzzle stored two moves — the opponent's and the answer —
+            // so the line that shows what the answer was *for* was computed,
+            // used once on screen, and thrown away. Both are needed before a
+            // drill can be walked rather than merely posed.
+            //
+            // `game_id` ties a position to the game it came from. Rows written
+            // before this migration keep the defaults and simply cannot be
+            // navigated; everything else about them still works.
+            "ALTER TABLE games ADD COLUMN moves_uci TEXT NOT NULL DEFAULT '';
+             ALTER TABLE drill_positions ADD COLUMN best_line TEXT NOT NULL DEFAULT '';
+             ALTER TABLE drill_positions ADD COLUMN game_id INTEGER",
         ];
 
         for (index, sql) in steps.iter().enumerate() {
@@ -888,15 +920,17 @@ impl Store {
 
     // -- games -----------------------------------------------------------
 
-    pub fn record_game(&self, game: &GameRecord) -> Result<()> {
+    /// Returns the row id, so a position lifted out of this game can point
+    /// back at it and be shown in the context it arose from.
+    pub fn record_game(&self, game: &GameRecord) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO games
              (played_at, player_white, opponent_elo, result, moves, accuracy,
               mean_loss, blunders, mistakes, inaccuracies, source,
               opening_loss, middlegame_loss, endgame_loss,
-              opening_moves, middlegame_moves, endgame_moves, player, opening, book_plies, time_control, pressure_moves, pressure_blunders)
+              opening_moves, middlegame_moves, endgame_moves, player, opening, book_plies, time_control, pressure_moves, pressure_blunders, moves_uci)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                     ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                     ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             params![
                 game.played_at,
                 game.player_white as i64,
@@ -921,9 +955,25 @@ impl Store {
                 game.time_control,
                 game.pressure_moves,
                 game.pressure_blunders,
+                game.moves_uci,
             ],
         )?;
-        Ok(())
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// The moves of a recorded game, if they were kept.
+    ///
+    /// Empty for anything stored before games carried their own moves, which is
+    /// why every caller has to cope with having no context to show.
+    pub fn game_moves(&self, game_id: i64) -> Result<Vec<String>> {
+        let raw: String = self
+            .conn
+            .query_row("SELECT moves_uci FROM games WHERE id = ?1", params![game_id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .unwrap_or_default();
+        Ok(raw.split_whitespace().map(str::to_owned).collect())
     }
 
     /// Forget every imported game, so an export can be analysed again after
@@ -997,7 +1047,7 @@ impl Store {
     pub fn drills_to_play(&self, limit: u32) -> Result<Vec<(String, DrillOrigin)>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT d.puzzle_id, d.source, d.played_at, d.ply, d.played, d.best,
-                    d.lost, d.phase, d.win_before
+                    d.lost, d.phase, d.win_before, d.best_line, d.game_id
              FROM drill_positions d
              WHERE d.player = ?1 OR d.player = ''
              ORDER BY d.lost DESC",
@@ -1015,6 +1065,8 @@ impl Store {
                     lost: r.get(6)?,
                     phase: r.get(7)?,
                     win_before: r.get(8)?,
+                    best_line: split_line(r.get::<_, String>(9)?),
+                    game_id: r.get(10)?,
                 },
             ))
         })?;
@@ -1122,34 +1174,29 @@ impl Store {
     // -- drills ----------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
-    pub fn record_drill_origin(
-        &self,
-        puzzle_id: &str,
-        source: &str,
-        played_at: DateTime<Utc>,
-        ply: u32,
-        played: &str,
-        best: &str,
-        lost: f64,
-        phase: &str,
-        win_before: f64,
-    ) -> Result<()> {
+    /// Takes the record rather than ten positional arguments, four of them
+    /// strings in a row. `played` and `best` are adjacent, the same type, and
+    /// mean opposite things; swapping them would compile and would quietly
+    /// teach the mistake as the answer.
+    pub fn record_drill_origin(&self, puzzle_id: &str, origin: &DrillOrigin) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO drill_positions
              (puzzle_id, source, played_at, ply, played, best, lost, phase, win_before,
-              player)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              player, best_line, game_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 puzzle_id,
-                source,
-                played_at,
-                ply,
-                played,
-                best,
-                lost,
-                phase,
-                win_before,
+                origin.source,
+                origin.played_at,
+                origin.ply,
+                origin.played,
+                origin.best,
+                origin.lost,
+                origin.phase,
+                origin.win_before,
                 self.setting("player_name")?.unwrap_or_default(),
+                origin.best_line.join(" "),
+                origin.game_id,
             ],
         )?;
         Ok(())
@@ -1160,7 +1207,8 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT source, played_at, ply, played, best, lost, phase, win_before
+                "SELECT source, played_at, ply, played, best, lost, phase, win_before,
+                        best_line, game_id
                  FROM drill_positions WHERE puzzle_id = ?1",
                 params![puzzle_id],
                 |r| {
@@ -1173,6 +1221,8 @@ impl Store {
                         lost: r.get(5)?,
                         phase: r.get(6)?,
                         win_before: r.get(7)?,
+                        best_line: split_line(r.get::<_, String>(8)?),
+                        game_id: r.get(9)?,
                     })
                 },
             )
@@ -1347,7 +1397,7 @@ impl Store {
                     opening_loss, middlegame_loss, endgame_loss,
                     opening_moves, middlegame_moves, endgame_moves, player,
                     opening, book_plies, time_control, pressure_moves,
-                    pressure_blunders";
+                    pressure_blunders, moves_uci";
         let read = |r: &rusqlite::Row<'_>| {
             Ok(GameRecord {
                 played_at: r.get(0)?,
@@ -1381,6 +1431,7 @@ impl Store {
                 time_control: r.get(20)?,
                 pressure_moves: r.get(21)?,
                 pressure_blunders: r.get(22)?,
+                moves_uci: r.get(23)?,
             })
         };
         let rows = match player {
@@ -1426,7 +1477,8 @@ impl Store {
 
     pub fn export_drill_positions(&self) -> Result<Vec<crate::backup::DrillRow>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT puzzle_id, source, played_at, ply, played, best, lost, phase, win_before
+            "SELECT puzzle_id, source, played_at, ply, played, best, lost, phase, win_before,
+                    best_line
              FROM drill_positions ORDER BY puzzle_id ASC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1440,6 +1492,7 @@ impl Store {
                 lost: r.get(6)?,
                 phase: r.get(7)?,
                 win_before: r.get(8)?,
+                best_line: split_line(r.get::<_, String>(9)?),
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1878,7 +1931,7 @@ mod tests {
         // Kept in step by hand deliberately: renumbering shipped migrations is
         // how a database gets corrupted, so the count is asserted instead.
         assert_eq!(
-            version, 8,
+            version, 9,
             "a migration was added without moving the version"
         );
     }
@@ -2010,6 +2063,98 @@ mod tests {
                 .any(|step| step.starts_with("SCAN p") || step.contains("SCAN p ")),
             "the corpus is scanned to find a repeat: {steps:?}"
         );
+    }
+
+    /// A game is its moves as well as its statistics, and a drill position is
+    /// the engine's line as well as the one right move.
+    ///
+    /// Neither was kept. Without the moves there is no way to show how a
+    /// position arose; without the line there is nothing to walk once the move
+    /// is found. Both had been computed and thrown away, which is why the
+    /// exercise built on them could only ever pose a position and grade a
+    /// guess.
+    #[test]
+    fn a_game_keeps_its_moves_and_a_drill_keeps_its_line() {
+        let store = Store::in_memory().expect("a store");
+        let played_at = Utc::now();
+        let game_id = store
+            .record_game(&GameRecord {
+                moves_uci: "e2e4 e7e5 g1f3".to_owned(),
+                played_at,
+                player_white: true,
+                opponent_elo: 1400,
+                result: "lost".to_owned(),
+                moves: 3,
+                accuracy: 80.0,
+                mean_loss: 0.05,
+                blunders: 1,
+                mistakes: 0,
+                inaccuracies: 0,
+                source: String::new(),
+                player: String::new(),
+                opening: String::new(),
+                book_plies: 0,
+                time_control: String::new(),
+                pressure_moves: 0,
+                pressure_blunders: 0,
+                phases: [PhaseLoss::UNKNOWN; 3],
+            })
+            .expect("record");
+        assert_eq!(
+            store.game_moves(game_id).expect("moves"),
+            vec!["e2e4", "e7e5", "g1f3"],
+            "a game was stored without the moves that made it"
+        );
+
+        store
+            .record_drill_origin(
+                "p1",
+                &DrillOrigin {
+                    source: String::new(),
+                    played_at,
+                    ply: 6,
+                    played: "Qd4".to_owned(),
+                    best: "Rxd7".to_owned(),
+                    lost: 0.34,
+                    phase: "middlegame".to_owned(),
+                    win_before: 0.82,
+                    best_line: vec!["d1d7".to_owned(), "c8d7".to_owned()],
+                    game_id: Some(game_id),
+                },
+            )
+            .expect("record");
+
+        let read = store.drill_origin("p1").expect("read").expect("a row");
+        assert_eq!(read.best_line, vec!["d1d7", "c8d7"], "the line was lost");
+        assert_eq!(read.game_id, Some(game_id), "the game link was lost");
+        assert_eq!(read.played, "Qd4");
+        assert_eq!(read.best, "Rxd7");
+
+        // And through the queue the Drill tab actually reads from.
+        let queued = store.drills_to_play(10).expect("queue");
+        let (_, origin) = queued.first().expect("a queued position");
+        assert_eq!(origin.best_line, vec!["d1d7", "c8d7"]);
+        assert_eq!(origin.game_id, Some(game_id));
+    }
+
+    /// A database written before any of this opens, reads, and simply has no
+    /// context to offer — never an error, and never a phantom empty move.
+    #[test]
+    fn a_row_from_before_the_line_was_kept_reads_as_having_none() {
+        let store = Store::in_memory().expect("a store");
+        store
+            .conn
+            .execute(
+                "INSERT INTO drill_positions
+                 (puzzle_id, source, played_at, ply, played, best, lost, phase)
+                 VALUES ('old', '', ?1, 4, 'Qd4', 'Rxd7', 0.3, 'middlegame')",
+                params![Utc::now()],
+            )
+            .expect("an old row");
+        let read = store.drill_origin("old").expect("read").expect("a row");
+        assert!(read.best_line.is_empty(), "empty text became a move");
+        assert_eq!(read.game_id, None);
+        assert!(store.game_moves(999).expect("missing game").is_empty());
     }
 
     /// Settings are the one place the application stores loose state, and a
