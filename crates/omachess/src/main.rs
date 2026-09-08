@@ -843,7 +843,7 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         eprintln!("omachess: no audio player found — running silent");
     }
 
-    let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone());
+    let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone(), engine.clone());
     let play = play_view::PlayView::new(
         store.clone(),
         pieces.clone(),

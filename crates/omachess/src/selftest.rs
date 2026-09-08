@@ -126,6 +126,23 @@ fn pump(seconds: u64, ready: impl Fn() -> bool) -> bool {
     ready()
 }
 
+/// A puzzle whose solution takes two moves, so the path through a *continued*
+/// line is exercised and not only the one that ends it.
+///
+/// Black plays f6, White answers Rb8+, Black's king steps to f7, White plays
+/// Rb7+. Nothing forced about it — what matters is that the solver moves twice.
+const TWO_MOVE: &str = "\
+PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags,DailyDate
+selftst3,6k1/5ppp/8/8/8/8/5PPP/1R4K1 b - - 0 1,f7f6 b1b8 g8f7 b8b7,1150,75,90,1000,endgame,https://lichess.org/c,,
+";
+
+fn two_move_store() -> Result<Store, String> {
+    let mut store = Store::in_memory().map_err(|e| e.to_string())?;
+    omachess_core::ingest::ingest_csv(&mut store, TWO_MOVE.as_bytes(), 1100)
+        .map_err(|e| e.to_string())?;
+    Ok(store)
+}
+
 fn seeded_store() -> Result<Store, String> {
     let mut store = Store::in_memory().map_err(|e| e.to_string())?;
     omachess_core::ingest::ingest_csv(&mut store, CORPUS.as_bytes(), 1100)
@@ -151,7 +168,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
     // --- the trainer: click a piece, click where it goes ------------------
     checks.push(check("a puzzle can be solved by clicking", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone());
+        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone(), None);
         trainer.begin_solving();
         expect(trainer.solving(), "the trainer did not start solving")?;
 
@@ -167,7 +184,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
 
     checks.push(check("a wrong move is refused, not accepted", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone());
+        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone(), None);
         trainer.begin_solving();
 
         // A legal but wrong rook move.
@@ -300,7 +317,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
     checks.push(check("a refused move says why, across the window", || {
         use crate::announce::{self, Tone};
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let trainer = Trainer::new(store, pieces.clone(), sounds.clone());
+        let trainer = Trainer::new(store, pieces.clone(), sounds.clone(), None);
         trainer.begin_solving();
         announce::clear();
 
@@ -625,7 +642,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
     checks.push(check("the progress view draws from real data", || {
         use gtk4::prelude::*;
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone());
+        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone(), None);
         trainer.begin_solving();
         trainer.board().click(Square::B1);
         trainer.board().click(Square::B8);
@@ -647,7 +664,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
     // --- the board's own vocabulary ---------------------------------------
     checks.push(check("mate is marked on the king that is mated", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
-        let trainer = Trainer::new(store, pieces.clone(), sounds.clone());
+        let trainer = Trainer::new(store, pieces.clone(), sounds.clone(), None);
         trainer.begin_solving();
         // Rb1-b8 is mate; the black king is on h8.
         trainer.board().click(Square::B1);
@@ -814,6 +831,84 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         )
     }));
 
+    // --- the engine as a teacher, and where it is not allowed --------------
+    //
+    // This is the load-bearing one. Every figure this application reports comes
+    // from correct attempts alone, timed with a stopwatch the solver can see.
+    // An engine consulted while that stopwatch is running would put its own
+    // latency inside the measurement — and it would do so invisibly, because a
+    // slower solve looks exactly like a slower solver. A wrong move sets the
+    // attempt to failed, and only from that instant is the clock out of the
+    // figures.
+    checks.push(check("the engine is never asked while the clock counts", || {
+        let engine = omachess_core::engine::find_engine();
+        expect(engine.is_some(), "no engine on PATH, so nothing to ask")?;
+        // A puzzle with two solver moves in it, so the check covers the move
+        // that continues a line as well as the one that ends it. With a
+        // mate-in-one the "continued" path is never reached, and a version of
+        // this check built on one passed while the engine was being consulted
+        // on every accepted move.
+        let store = Rc::new(RefCell::new(two_move_store()?));
+        let trainer = Trainer::new(store, pieces.clone(), sounds.clone(), engine);
+        trainer.begin_solving();
+
+        // Solve it correctly, start to finish. Nothing on this path may consult
+        // the engine: the attempt counts, and its time is the measurement.
+        trainer.board().click(Square::B1);
+        trainer.board().click(Square::B8);
+        expect(
+            trainer.lesson_asks() == 0,
+            &format!(
+                "the engine was asked {} times on a move that continued the line",
+                trainer.lesson_asks()
+            ),
+        )?;
+        trainer.board().click(Square::B8);
+        trainer.board().click(Square::B7);
+        expect(
+            trainer.lesson_asks() == 0,
+            &format!(
+                "the engine was asked {} times finishing an attempt that counted",
+                trainer.lesson_asks()
+            ),
+        )
+    }));
+
+    checks.push(check("a wrong move is explained, not just refused", || {
+        let engine = omachess_core::engine::find_engine();
+        expect(engine.is_some(), "no engine on PATH, so nothing to explain")?;
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let trainer = Trainer::new(store, pieces.clone(), sounds.clone(), engine);
+        trainer.begin_solving();
+
+        // Legal, and not the answer. Rb1-b4 hangs nothing but solves nothing.
+        trainer.board().click(Square::B1);
+        trainer.board().click(Square::B4);
+        expect(
+            trainer.lesson_asks() == 1,
+            &format!(
+                "a wrong move asked the engine {} times",
+                trainer.lesson_asks()
+            ),
+        )?;
+        expect(
+            pump(60, || {
+                let said = trainer.lesson_text();
+                !said.is_empty() && said != "Looking at why…"
+            }),
+            &format!(
+                "the engine never said why the move was wrong: {:?}",
+                trainer.lesson_text()
+            ),
+        )?;
+        // It has to be about the move that was played, not about chess.
+        let said = trainer.lesson_text();
+        expect(
+            said.starts_with("Rb4"),
+            &format!("the explanation did not name the move played: {said:?}"),
+        )
+    }));
+
     // --- Progress: a measurement, not an essay ----------------------------
     //
     // The page carried eight hundred and seventy-seven words of explanation
@@ -834,7 +929,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
             )),
             Err(_) => Rc::new(RefCell::new(seeded_store()?)),
         };
-        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone());
+        let trainer = Trainer::new(store.clone(), pieces.clone(), sounds.clone(), None);
         trainer.begin_solving();
         trainer.board().click(Square::B1);
         trainer.board().click(Square::B8);

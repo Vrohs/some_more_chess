@@ -16,9 +16,15 @@ use shakmaty::san::San;
 use shakmaty::{Move, Position, Square};
 
 use crate::board::BoardView;
+use crate::engine_worker::{EngineWorker, Reply, Request};
 use crate::pieces::PieceSet;
 use crate::progress_view::ProgressData;
 use crate::sound::{Cue, Sounds};
+
+/// How deep the refutation is searched. Deeper than a move in a game needs to
+/// be, because this one is being explained rather than played, and the solver
+/// is no longer on a clock that counts.
+const LESSON_DEPTH: u32 = 18;
 
 /// How long a rejected move stays highlighted.
 /// Wrong moves before the answer is shown. The attempt already counts as failed
@@ -63,6 +69,25 @@ pub struct Trainer {
     status: Label,
     timer: Label,
     detail: Label,
+    /// Why the last wrong move was wrong, once the engine has said.
+    lesson: Label,
+    /// The engine, when there is one. Absent is a working trainer without
+    /// explanations, never a broken one.
+    worker: Option<EngineWorker>,
+    /// Identifies the position a refutation was asked about, so an answer that
+    /// arrives after the solver has moved on is dropped rather than shown
+    /// against a position it was never about.
+    lesson_token: Cell<u64>,
+    /// Only one question is ever outstanding. Asking again while the engine is
+    /// still thinking builds a backlog of answers nobody will read, which is
+    /// how the Study tab came to look like it had stopped.
+    lesson_busy: Cell<bool>,
+    /// How many refutations have been asked for. Read by the self-test: the
+    /// engine must never be asked while an attempt can still be measured.
+    lesson_asks: Cell<u64>,
+    /// The position and the move the outstanding question is about, so the
+    /// answer is read against the board it was asked for.
+    asked_about: RefCell<Option<(shakmaty::Chess, String)>>,
     current: RefCell<Option<Current>>,
 }
 
@@ -71,6 +96,7 @@ impl Trainer {
         store: Rc<RefCell<Store>>,
         pieces: Option<Rc<PieceSet>>,
         sounds: Rc<Sounds>,
+        engine: Option<std::path::PathBuf>,
     ) -> Rc<Self> {
         let board = BoardView::new(pieces);
 
@@ -112,6 +138,15 @@ impl Trainer {
             .build();
         mode_caption.add_css_class("dim-label");
 
+        // What punishes the move that was just played. Empty until there is
+        // something true to put in it.
+        let lesson = Label::builder()
+            .halign(Align::Start)
+            .wrap(true)
+            .max_width_chars(34)
+            .build();
+        lesson.add_css_class("omachess-lesson");
+
         // Timing cannot begin before the solver is looking, so the position is
         // withheld until this is pressed. Showing it first would let anyone
         // solve at leisure and then start the clock.
@@ -137,6 +172,7 @@ impl Trainer {
         header.append(&status);
         header.append(&mode_caption);
         header.append(&origin);
+        header.append(&lesson);
 
         let root = GtkBox::builder()
             .orientation(Orientation::Vertical)
@@ -197,6 +233,12 @@ impl Trainer {
             status,
             timer,
             detail,
+            lesson,
+            worker: engine.map(EngineWorker::spawn),
+            lesson_token: Cell::new(0),
+            lesson_busy: Cell::new(false),
+            lesson_asks: Cell::new(0),
+            asked_about: RefCell::new(None),
             current: RefCell::new(None),
         });
 
@@ -206,6 +248,21 @@ impl Trainer {
                 trainer.begin_solving();
             }
         });
+
+        // Engine answers arrive on a channel, so something has to look. Weak,
+        // so the timer cannot be the reason the trainer stays alive.
+        if trainer.worker.is_some() {
+            let weak: Weak<Self> = Rc::downgrade(&trainer);
+            glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
+                match weak.upgrade() {
+                    Some(trainer) => {
+                        trainer.drain_engine();
+                        glib::ControlFlow::Continue
+                    }
+                    None => glib::ControlFlow::Break,
+                }
+            });
+        }
 
         trainer.mode_switch.set_active(trainer.repeat_mode());
         trainer.describe_mode();
@@ -299,6 +356,16 @@ impl Trainer {
     }
 
     /// Whether the trainer is currently re-testing rather than teaching.
+    /// How many refutations have been asked for. For the self-test, which has
+    /// to be able to prove the engine stayed out of the measured phase.
+    pub(crate) fn lesson_asks(&self) -> u64 {
+        self.lesson_asks.get()
+    }
+
+    pub(crate) fn lesson_text(&self) -> String {
+        self.lesson.text().to_string()
+    }
+
     pub fn repeat_mode(&self) -> bool {
         self.store.borrow().repeat_mode().unwrap_or(false)
     }
@@ -336,6 +403,11 @@ impl Trainer {
         // revealed is cleared before it appears.
         self.origin.set_label("");
         self.origin.remove_css_class("warning");
+        // A refutation belongs to the position it was asked about. Bumping the
+        // token retires any answer still in flight for the puzzle just left.
+        self.lesson.set_label("");
+        self.lesson_token.set(self.lesson_token.get().wrapping_add(1));
+        *self.asked_about.borrow_mut() = None;
         crate::announce::clear();
         let next = {
             let store = self.store.borrow();
@@ -732,7 +804,14 @@ impl Trainer {
         match outcome {
             Ok(MoveOutcome::Wrong) => {
                 self.sounds.play(Cue::Wrong);
-                self.reject()
+                self.reject();
+                // Only now. A wrong move has just set `failed`, and every
+                // measurement in this application counts correct attempts
+                // alone — so from here the clock on this puzzle is already out
+                // of the figures and the engine cannot distort one. Asking a
+                // move earlier would put engine latency inside the very number
+                // the application exists to report.
+                self.ask_why(mv);
             }
             Ok(MoveOutcome::Continued(reply)) => {
                 if let Some(current) = self.current.borrow().as_ref() {
@@ -766,6 +845,103 @@ impl Trainer {
                 self.finish();
             }
             Err(e) => self.status.set_label(&format!("{e}")),
+        }
+    }
+
+    /// Ask what punishes the move that was just played.
+    ///
+    /// The question is about the position the mistake leads to, which nobody
+    /// has analysed: the puzzle's author never considered it. That is exactly
+    /// what an engine is for, and it is the only thing in this loop one is
+    /// asked.
+    fn ask_why(&self, mv: &Move) {
+        self.lesson.set_label("");
+        let Some(worker) = &self.worker else {
+            return;
+        };
+        // One question at a time. A solver trying four wrong moves in a row
+        // would otherwise queue four searches and read the answer to the first.
+        if self.lesson_busy.get() {
+            return;
+        }
+        let after = {
+            let current = self.current.borrow();
+            let Some(current) = current.as_ref() else {
+                return;
+            };
+            let mut position = current.attempt.position().clone();
+            position.play_unchecked(*mv);
+            position
+        };
+        let played = {
+            let current = self.current.borrow();
+            match current.as_ref() {
+                Some(current) => shakmaty::san::SanPlus::from_move(
+                    current.attempt.position().clone(),
+                    *mv,
+                )
+                .to_string(),
+                None => return,
+            }
+        };
+
+        let token = self.lesson_token.get().wrapping_add(1);
+        self.lesson_token.set(token);
+        *self.asked_about.borrow_mut() = Some((after.clone(), played));
+
+        let fen =
+            shakmaty::fen::Fen::from_position(&after, shakmaty::EnPassantMode::Legal).to_string();
+        if worker.send(Request::Evaluate {
+            fen,
+            moves: Vec::new(),
+            depth: LESSON_DEPTH,
+            token,
+        }) {
+            self.lesson_busy.set(true);
+            self.lesson_asks.set(self.lesson_asks.get() + 1);
+            self.lesson.set_label("Looking at why…");
+        }
+    }
+
+    /// Take whatever the engine has said, and say it in one line.
+    fn drain_engine(&self) {
+        let Some(worker) = &self.worker else {
+            return;
+        };
+        // Bounded: an unbounded drain on the thread drawing the window is one
+        // bad reply away from freezing it.
+        let mut budget = 16;
+        while let Some(reply) = worker.poll() {
+            budget -= 1;
+            if budget < 0 {
+                break;
+            }
+            match reply {
+                Reply::Evaluation { analysis, token } => {
+                    self.lesson_busy.set(false);
+                    if token != self.lesson_token.get() {
+                        continue;
+                    }
+                    let asked = self.asked_about.borrow();
+                    let Some((after, played)) = asked.as_ref() else {
+                        continue;
+                    };
+                    match omachess_core::teach::refutation(after, &analysis) {
+                        Some(found) => self.lesson.set_label(&found.describe(played)),
+                        // An engine that returned nothing usable says nothing.
+                        // A blank line is honest; a confident one would not be.
+                        None => self.lesson.set_label(""),
+                    }
+                }
+                Reply::Failed(_) => {
+                    self.lesson_busy.set(false);
+                    self.lesson.set_label("");
+                }
+                _ => {}
+            }
+        }
+        if worker.is_finished() {
+            self.lesson_busy.set(false);
         }
     }
 

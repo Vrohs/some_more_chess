@@ -18,9 +18,7 @@ use omachess_core::game::START_FEN;
 use omachess_core::openings;
 use omachess_core::pgn::ImportedGame;
 use omachess_core::study::Walkthrough;
-use shakmaty::san::San;
-use shakmaty::uci::UciMove;
-use shakmaty::{Chess, Position};
+use shakmaty::Position;
 
 use crate::board::BoardView;
 use crate::engine_worker::{EngineWorker, Reply, Request};
@@ -631,7 +629,7 @@ impl StudyView {
             self.evaluation.set_label(&describe_score(score, mover));
         }
         if let Some(best) = &analysis.best_move {
-            let san = to_san(&position, std::slice::from_ref(best));
+            let san = omachess_core::game::line_to_san(&position, std::slice::from_ref(best));
             let played = self
                 .walk
                 .borrow()
@@ -651,7 +649,7 @@ impl StudyView {
                 ),
             });
         }
-        let line = to_san(&position, &analysis.pv);
+        let line = omachess_core::game::line_to_san(&position, &analysis.pv);
         self.variation.set_label(&if line.is_empty() {
             String::new()
         } else {
@@ -666,23 +664,6 @@ enum Step {
     Back,
     Forward,
     End,
-}
-
-/// Turn engine moves into notation a person reads.
-fn to_san(position: &Chess, moves: &[String]) -> Vec<String> {
-    let mut position = position.clone();
-    let mut out = Vec::with_capacity(moves.len());
-    for uci in moves {
-        let Ok(parsed) = uci.parse::<UciMove>() else {
-            break;
-        };
-        let Ok(mv) = parsed.to_move(&position) else {
-            break;
-        };
-        out.push(San::from_move(&position, mv).to_string());
-        position.play_unchecked(mv);
-    }
-    out
 }
 
 /// State the evaluation from White's point of view, as every chess book does,
@@ -776,13 +757,13 @@ mod tests {
             .iter()
             .map(|m| m.to_string())
             .collect();
-        assert_eq!(to_san(&Chess::default(), &line), ["e4", "e5", "Nf3"]);
+        assert_eq!(omachess_core::game::line_to_san(&shakmaty::Chess::default(), &line), ["e4", "e5", "Nf3"]);
     }
 
     #[test]
     fn an_unplayable_variation_is_truncated_rather_than_dropped() {
         let line: Vec<String> = ["e2e4", "a1a8"].iter().map(|m| m.to_string()).collect();
-        assert_eq!(to_san(&Chess::default(), &line), ["e4"]);
+        assert_eq!(omachess_core::game::line_to_san(&shakmaty::Chess::default(), &line), ["e4"]);
     }
 
     #[test]

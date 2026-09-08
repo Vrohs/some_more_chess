@@ -164,6 +164,11 @@ const DEFAULT_CSS: &str = r#"
     font-feature-settings: "tnum";
     font-size: 13px;
 }
+/* Why the last move was wrong. Not dimmed: it is the only thing on the panel
+   that teaches anything, and a dim-label would file it under decoration. */
+.omachess-lesson {
+    font-size: 13px;
+}
 /* The sparkline reads its stroke colour from CSS, so the chart stays on the
    Omarchy palette even though the board no longer does. */
 .omachess-spark { color: @accent_color; }

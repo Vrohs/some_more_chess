@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use shakmaty::fen::Fen;
-use shakmaty::san::San;
+use shakmaty::san::{San, SanPlus};
 use shakmaty::uci::UciMove;
 use shakmaty::{Chess, Color, EnPassantMode, KnownOutcome, Move, Position, Role, Square};
 
@@ -98,6 +98,31 @@ pub fn promotion_choices(position: &Chess, from: Square, to: Square) -> Vec<Role
     found.sort_by_key(|role| ORDER.iter().position(|r| r == role).unwrap_or(usize::MAX));
     found.dedup();
     found
+}
+
+/// A line of UCI moves in the notation a player reads.
+///
+/// Truncated at the first move that will not play rather than dropped: an
+/// engine line that goes wrong halfway is still worth the half that was right,
+/// and showing nothing hides the fault instead of bounding it.
+///
+/// `SanPlus`, not `San`: the plain form omits the check and mate marks, so a
+/// line ending in mate reads as an ordinary quiet move — which, in a line whose
+/// entire point is that it ends the game, is the one thing it must not do.
+pub fn line_to_san(position: &Chess, moves: &[String]) -> Vec<String> {
+    let mut position = position.clone();
+    let mut out = Vec::with_capacity(moves.len());
+    for uci in moves {
+        let Ok(parsed) = uci.parse::<UciMove>() else {
+            break;
+        };
+        let Ok(mv) = parsed.to_move(&position) else {
+            break;
+        };
+        out.push(SanPlus::from_move(position.clone(), mv).to_string());
+        position.play_unchecked(mv);
+    }
+    out
 }
 
 pub fn find_move(position: &Chess, from: Square, to: Square, prefer: Option<&str>) -> Option<Move> {
@@ -562,6 +587,41 @@ mod tests {
             find_move(&pos, Square::E5, Square::D6, None).expect("en passant must be reachable");
         assert!(mv.is_en_passant());
         assert!(mv.is_capture(), "en passant is a capture");
+    }
+
+    /// The engine's line is only useful in the notation people read, and a
+    /// line that goes wrong halfway is worth the half that was right.
+    #[test]
+    fn a_line_reads_as_notation_and_stops_where_it_breaks() {
+        let position = Chess::default();
+        let line = vec!["e2e4".to_owned(), "e7e5".to_owned(), "g1f3".to_owned()];
+        assert_eq!(line_to_san(&position, &line), vec!["e4", "e5", "Nf3"]);
+
+        let mut broken = line.clone();
+        broken.insert(1, "a1a8".to_owned());
+        assert_eq!(
+            line_to_san(&position, &broken),
+            vec!["e4"],
+            "an illegal move should bound the line, not be skipped over"
+        );
+        assert!(line_to_san(&position, &["nonsense".to_owned()]).is_empty());
+    }
+
+    /// A mating line has to say it mates. `San` omits the marks and `SanPlus`
+    /// carries them, and the difference is the whole meaning of the last move.
+    #[test]
+    fn a_line_that_ends_the_game_says_so() {
+        use shakmaty::CastlingMode;
+        let position: Chess = "6k1/5ppp/8/8/8/8/5PPP/1R4K1 w - - 0 1"
+            .parse::<Fen>()
+            .expect("a legal fen")
+            .into_position(CastlingMode::Standard)
+            .expect("a legal position");
+        assert_eq!(
+            line_to_san(&position, &["b1b8".to_owned()]),
+            vec!["Rb8#"],
+            "a back-rank mate was written as a quiet rook move"
+        );
     }
 
     /// A promotion has to be offered rather than assumed. Underpromotion is
