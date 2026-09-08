@@ -33,6 +33,41 @@ use crate::pieces::PieceSet;
 const DEFENCE_MS: u64 = 700;
 const POLL_MS: u32 = 80;
 
+/// The position every ordinary game starts from.
+const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+/// A FEN as a position. `drill::position_after` needs a move to apply and
+/// returns nothing without one, which is not what is wanted here.
+fn position_of(fen: &str) -> Option<shakmaty::Chess> {
+    fen.parse::<shakmaty::fen::Fen>()
+        .ok()?
+        .into_position::<shakmaty::Chess>(shakmaty::CastlingMode::Standard)
+        .ok()
+}
+
+/// Whether two positions are the same to play from, ignoring the clocks.
+fn same_position(a: &shakmaty::Chess, b: &shakmaty::Chess) -> bool {
+    let strip = |p: &shakmaty::Chess| {
+        shakmaty::fen::Fen::from_position(p, shakmaty::EnPassantMode::Legal)
+            .to_string()
+            .split_whitespace()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    strip(a) == strip(b)
+}
+
+/// Play a line out, or nothing if any of it will not play.
+fn replay(from: &shakmaty::Chess, moves: &[String]) -> Option<shakmaty::Chess> {
+    let mut position = from.clone();
+    for uci in moves {
+        let mv = uci.parse::<shakmaty::uci::UciMove>().ok()?.to_move(&position).ok()?;
+        position.play_unchecked(mv);
+    }
+    Some(position)
+}
+
 /// What the exercise is asking for right now.
 ///
 /// It used to ask for only one thing — play the position out — and told the
@@ -78,9 +113,15 @@ pub struct DrillView {
     misses: Cell<u32>,
     /// Why the last attempt was wrong, once the engine has said.
     lesson: Label,
-    /// The engine's line, and where in it the reader is.
-    line: RefCell<Vec<String>>,
-    line_at: Cell<usize>,
+    /// One axis to walk: the moves that led to the mistake, then — once it has
+    /// been answered — the line that should have been played. The cursor starts
+    /// at the mistake, so Back is how the position arose and Next is what to do
+    /// about it.
+    nav_base: RefCell<String>,
+    nav_moves: RefCell<Vec<String>>,
+    /// Where in `nav_moves` the mistake sits.
+    nav_pivot: Cell<usize>,
+    nav_at: Cell<usize>,
     prev: Button,
     next: Button,
     /// One question outstanding, and answers for a position already left
@@ -218,8 +259,10 @@ impl DrillView {
             stage: Cell::new(Stage::Find),
             misses: Cell::new(0),
             lesson,
-            line: RefCell::new(Vec::new()),
-            line_at: Cell::new(0),
+            nav_base: RefCell::new(String::new()),
+            nav_moves: RefCell::new(Vec::new()),
+            nav_pivot: Cell::new(0),
+            nav_at: Cell::new(0),
             prev,
             next,
             lesson_busy: Cell::new(false),
@@ -468,8 +511,7 @@ impl DrillView {
         self.thinking.set(false);
         self.misses.set(0);
         self.lesson.set_label("");
-        self.line.borrow_mut().clear();
-        self.steps_visible(false);
+        self.build_navigation(&origin, &fen);
         self.start.set_label("Show me");
         self.status.set_label("");
         self.countdown.set_label("");
@@ -576,35 +618,92 @@ impl DrillView {
         };
         self.lesson
             .set_label(&format!("{} was the move. {shown}", origin.best));
-        *self.line.borrow_mut() = origin.best_line.clone();
-        self.line_at.set(0);
-        self.steps_visible(!origin.best_line.is_empty());
+        self.nav_moves
+            .borrow_mut()
+            .extend(origin.best_line.iter().cloned());
+        self.steps_visible(self.nav_moves.borrow().len() > self.nav_pivot.get()
+            || self.nav_pivot.get() > 0);
         self.stage.set(Stage::PlayOut);
         self.idea.set_label("Now play it out against the engine.");
         self.start.set_label("Play it out");
     }
 
     /// Step the engine's line on the board.
-    fn step_line(&self, forward: bool) {
-        let Some((_, _, fen)) = self.entry() else {
+    /// Work out what can be walked, and put the cursor on the mistake.
+    ///
+    /// The moves that led here come from the game the position was taken out
+    /// of. Games do not store the position they started from, so rather than
+    /// assume the standard one, the moves are replayed from it and the result
+    /// compared against the position this drill actually poses. If they agree,
+    /// the context is real; if they do not — a game seeded from an opening
+    /// line, or moves from some other game — there is simply no context to
+    /// offer, which is far better than a board showing the wrong thing.
+    fn build_navigation(&self, origin: &DrillOrigin, fen: &str) {
+        self.nav_moves.borrow_mut().clear();
+        *self.nav_base.borrow_mut() = fen.to_owned();
+        self.nav_pivot.set(0);
+        self.nav_at.set(0);
+        self.steps_visible(false);
+
+        let Some(game_id) = origin.game_id else {
             return;
         };
-        let line = self.line.borrow().clone();
-        if line.is_empty() {
+        let moves = self.store.borrow().game_moves(game_id).unwrap_or_default();
+        let upto = origin.ply as usize;
+        if moves.len() < upto {
             return;
         }
-        let at = self.line_at.get();
+        let context: Vec<String> = moves[..upto].to_vec();
+
+        let Some(start) = position_of(START_FEN) else {
+            return;
+        };
+        let Some(reached) = replay(&start, &context) else {
+            return;
+        };
+        let Some(posed) = position_of(fen) else {
+            return;
+        };
+        // Pieces, side to move, castling and en passant — not the move counters.
+        // A position reached by replaying is the same position whatever the
+        // halfmove clock says, and comparing whole FENs made this fail on an
+        // exact match.
+        if !same_position(&reached, &posed) {
+            return;
+        }
+
+        *self.nav_base.borrow_mut() = START_FEN.to_owned();
+        *self.nav_moves.borrow_mut() = context;
+        self.nav_pivot.set(upto);
+        self.nav_at.set(upto);
+        self.steps_visible(upto > 0);
+    }
+
+    /// Step the cursor along the axis and redraw.
+    ///
+    /// Forward cannot reach the answer while the question is open because the
+    /// answer is not on the axis yet — `reveal_answer` appends it. A separate
+    /// cap keyed on the stage was written first and removed: no mutation could
+    /// make it fire, so it was decoration that read as a rule.
+    fn step_line(&self, forward: bool) {
+        let moves = self.nav_moves.borrow().clone();
+        if moves.is_empty() {
+            return;
+        }
+        let at = self.nav_at.get();
         let at = if forward {
-            (at + 1).min(line.len())
+            (at + 1).min(moves.len())
         } else {
             at.saturating_sub(1)
         };
-        self.line_at.set(at);
-        let Some(mut position) = omachess_core::drill::position_after(&fen, "") else {
+        self.nav_at.set(at);
+
+        let base = self.nav_base.borrow().clone();
+        let Some(mut position) = position_of(&base) else {
             return;
         };
         let mut last = None;
-        for uci in line.iter().take(at) {
+        for uci in moves.iter().take(at) {
             let Ok(parsed) = uci.parse::<shakmaty::uci::UciMove>() else {
                 break;
             };
@@ -616,9 +715,33 @@ impl DrillView {
         }
         self.board.set_position(&position);
         self.board.set_last_move(last);
-        self.status
-            .set_label(&format!("Line: move {at} of {}", line.len()));
+        self.board.select(None);
+
+        let pivot = self.nav_pivot.get();
+        self.status.set_label(&match at.cmp(&pivot) {
+            std::cmp::Ordering::Less => format!("{} moves before it", pivot - at),
+            std::cmp::Ordering::Equal => "The position you had".to_owned(),
+            std::cmp::Ordering::Greater => format!("Line: {} of {}", at - pivot, moves.len() - pivot),
+        });
     }
+
+    pub(crate) fn step_back(&self) {
+        self.step_line(false);
+    }
+
+    pub(crate) fn step_forward(&self) {
+        self.step_line(true);
+    }
+
+    /// Where the cursor is, and what it can reach. For the self-test.
+    pub(crate) fn navigation(&self) -> (usize, usize, usize) {
+        (
+            self.nav_at.get(),
+            self.nav_pivot.get(),
+            self.nav_moves.borrow().len(),
+        )
+    }
+
 
     /// Whichever side is to move in the position is the side the player had.
     fn player_side(&self, fen: &str) -> Color {

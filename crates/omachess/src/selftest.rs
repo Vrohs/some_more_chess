@@ -1061,6 +1061,150 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         )
     }));
 
+    // Going back over your own game should let you see how the position arose,
+    // not drop a FEN on the board. The moves are replayed from the standard
+    // start and checked against the position the drill actually poses, so a
+    // game seeded from an opening line offers no context rather than a board
+    // showing something else.
+    checks.push(check("a drill can be walked back through the game", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let game_id = store
+            .borrow()
+            .record_game(&omachess_core::store::GameRecord {
+                // 1.e4 e5 2.Nf3 Nc6 3.Bc4 Nf6 — six plies, then the mistake.
+                moves_uci: "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6".to_owned(),
+                played_at: chrono::Utc::now(),
+                player_white: true,
+                opponent_elo: 1400,
+                result: "lost".to_owned(),
+                moves: 6,
+                accuracy: 70.0,
+                mean_loss: 0.1,
+                blunders: 1,
+                mistakes: 0,
+                inaccuracies: 0,
+                source: String::new(),
+                player: String::new(),
+                opening: String::new(),
+                book_plies: 0,
+                time_control: String::new(),
+                pressure_moves: 0,
+                pressure_blunders: 0,
+                phases: [omachess_core::store::PhaseLoss::UNKNOWN; 3],
+            })
+            .map_err(|e| e.to_string())?;
+
+        // The puzzle poses the position after those six plies: its own FEN is
+        // one move earlier, plus the move that reached it.
+        let puzzle = omachess_core::puzzle::Puzzle {
+            id: "walkback".to_owned(),
+            fen: "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3".to_owned(),
+            moves: vec!["g8f6".to_owned(), "f3g5".to_owned()],
+            rating: 1200,
+            rating_deviation: 0,
+            popularity: 0,
+            nb_plays: 0,
+            themes: vec!["middlegame".to_owned()],
+            game_url: String::new(),
+            opening_tags: Vec::new(),
+        };
+        store
+            .borrow_mut()
+            .insert_puzzles(std::slice::from_ref(&puzzle))
+            .map_err(|e| e.to_string())?;
+        store
+            .borrow()
+            .record_drill_origin(
+                "walkback",
+                &DrillOrigin {
+                    source: String::new(),
+                    played_at: chrono::Utc::now(),
+                    ply: 6,
+                    played: "Bc5".to_owned(),
+                    best: "Nxe4".to_owned(),
+                    lost: 0.3,
+                    phase: "opening".to_owned(),
+                    win_before: 0.7,
+                    best_line: vec!["f3g5".to_owned()],
+                    game_id: Some(game_id),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+
+        let drills = DrillView::new(store.clone(), pieces.clone(), None);
+        drills.focus("walkback");
+
+        let (at, pivot, len) = drills.navigation();
+        expect(
+            pivot == 6,
+            &format!("the six moves before the mistake were not found: pivot {pivot}"),
+        )?;
+        expect(
+            at == pivot,
+            &format!("the exercise did not open on the mistake: at {at}, pivot {pivot}"),
+        )?;
+        expect(len >= 6, &format!("nothing to walk: {len} moves"))?;
+
+        // Back goes into the game.
+        drills.step_back();
+        drills.step_back();
+        let (at, _, _) = drills.navigation();
+        expect(at == 4, &format!("stepping back twice reached {at}, wanted 4"))?;
+
+        // Forward stops at the mistake: the answer is not on the axis yet.
+        for _ in 0..5 {
+            drills.step_forward();
+        }
+        let (at, pivot, _) = drills.navigation();
+        expect(
+            at == pivot,
+            &format!("stepping forward walked past the mistake to {at} of {pivot}"),
+        )?;
+
+        // And the case the replay check exists for: a position whose game does
+        // not lead to it — a game seeded from an opening line, or a stale link.
+        // Offering no context is right; a board showing some other game is not.
+        let wrong = omachess_core::puzzle::Puzzle {
+            id: "mismatch".to_owned(),
+            fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_owned(),
+            moves: vec!["a2a3".to_owned(), "a7a6".to_owned()],
+            ..puzzle.clone()
+        };
+        store
+            .borrow_mut()
+            .insert_puzzles(std::slice::from_ref(&wrong))
+            .map_err(|e| e.to_string())?;
+        store
+            .borrow()
+            .record_drill_origin(
+                "mismatch",
+                &DrillOrigin {
+                    source: String::new(),
+                    played_at: chrono::Utc::now(),
+                    ply: 6,
+                    played: "a3".to_owned(),
+                    best: "e4".to_owned(),
+                    lost: 0.9,
+                    phase: "opening".to_owned(),
+                    win_before: 0.7,
+                    best_line: Vec::new(),
+                    // Points at the game above, whose six moves reach a
+                    // completely different position.
+                    game_id: Some(game_id),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        drills.focus("mismatch");
+        let (_, pivot, len) = drills.navigation();
+        expect(
+            pivot == 0 && len == 0,
+            &format!(
+                "a game that does not lead to this position was offered as its \
+                 context: pivot {pivot}, {len} moves"
+            ),
+        )
+    }));
+
     // --- the exercise, which is the point of the tab ----------------------
     //
     // It used to open on "Play it out against the engine. What you played last
