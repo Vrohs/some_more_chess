@@ -788,13 +788,17 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         // The list of flagged moves only appears when there is something to
         // flag, and a two-ply game has nothing. What always has to arrive is
         // the report itself, which is what turns a game into training material.
+        // Anywhere on the panel, not one named label: the figures moved out of
+        // the detail line into tiles, and a check pinned to where a number used
+        // to live tests the layout rather than the thing.
         expect(
-            pump(90, || play.detail_text().contains("Accuracy")),
+            pump(90, || {
+                play.panel_labels().iter().any(|t| t.contains("Accuracy"))
+            }),
             &format!(
                 "the report never reached the screen, so the game was analysed \
-                 for nobody. {} detail {:?}",
-                play.describe_state(),
-                play.detail_text()
+                 for nobody. {}",
+                play.describe_state()
             ),
         )
     }));
@@ -906,6 +910,42 @@ pub fn run(pieces: Option<Rc<PieceSet>>, sounds: Rc<Sounds>, filter: Option<&str
         expect(
             said.starts_with("Rb4"),
             &format!("the explanation did not name the move played: {said:?}"),
+        )
+    }));
+
+    // Play grew the same way Progress did: 287 words of explanation, and a
+    // finished game reported as four paragraphs in a single label — accuracy
+    // and loss in a sentence, the counts in a second, the weakest phase in a
+    // third, the clock in two more. Every number in it was real and none could
+    // be found. The same limit, enforced the same way.
+    checks.push(check("the play panel states numbers, not paragraphs", || {
+        const LIMIT: usize = 12;
+        let engine = omachess_core::engine::find_engine();
+        expect(engine.is_some(), "no engine on PATH, so no report to read")?;
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let play = PlayView::new(store, pieces.clone(), sounds.clone(), engine);
+        play.begin_game();
+        play.board().drag(Square::E2, Square::E4);
+        pump(30, || play.moves_played() >= 2);
+        play.give_up();
+        // The report is the part that used to be an essay, so it has to be on
+        // screen before this means anything.
+        expect(
+            pump(90, || {
+                play.panel_labels().iter().any(|t| t.contains("Accuracy"))
+            }),
+            "the report never arrived, so nothing was checked",
+        )?;
+
+        let labels = play.panel_labels();
+        let worst = labels
+            .iter()
+            .max_by_key(|text| text.split_whitespace().count())
+            .expect("a label");
+        let words = worst.split_whitespace().count();
+        expect(
+            words <= LIMIT,
+            &format!("a label runs to {words} words, over the {LIMIT}-word limit: {worst:?}"),
         )
     }));
 

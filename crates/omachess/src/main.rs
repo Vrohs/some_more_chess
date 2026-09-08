@@ -6,6 +6,7 @@ mod charts;
 mod drill_view;
 mod endgame_view;
 mod engine_worker;
+mod figures;
 mod pieces;
 mod play_view;
 mod progress_view;

@@ -84,6 +84,8 @@ pub struct PlayView {
     drill_button: Button,
     add_button: Button,
     plan_box: GtkBox,
+    /// The figures a finished game produced: tiles, phase bars, the clock.
+    report_box: GtkBox,
     thinking: Cell<bool>,
 }
 
@@ -202,6 +204,12 @@ impl PlayView {
         // Before a game there is nothing to say about the position, and the
         // panel was simply empty. What to train is the useful thing to put in
         // front of someone who has just opened the application.
+        let report_box = GtkBox::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(6)
+            .visible(false)
+            .build();
+
         let plan_box = GtkBox::builder()
             .orientation(Orientation::Vertical)
             .spacing(4)
@@ -234,6 +242,7 @@ impl PlayView {
         panel.append(&review_scroll);
         panel.append(&drill_button);
         panel.append(&add_button);
+        panel.append(&report_box);
         panel.append(&plan_box);
 
         let panel_scroll = ScrolledWindow::builder()
@@ -291,6 +300,7 @@ impl PlayView {
             drill_button,
             add_button,
             plan_box,
+            report_box,
             thinking: Cell::new(false),
         });
 
@@ -399,8 +409,33 @@ impl PlayView {
     }
 
     /// The line under the status, which after a game carries the report.
-    pub(crate) fn detail_text(&self) -> String {
-        self.detail.text().to_string()
+    /// Every label on the panel except the scoresheet, which is a move list and
+    /// is meant to be long. This is the surface a reader actually complains
+    /// about: the status line, the report, and whatever the tab says about it.
+    pub(crate) fn panel_labels(&self) -> Vec<String> {
+        fn walk(widget: &gtk4::Widget, skip: &gtk4::Widget, out: &mut Vec<String>) {
+            if widget == skip {
+                return;
+            }
+            if let Some(label) = widget.downcast_ref::<Label>() {
+                let text = label.text().to_string();
+                if !text.is_empty() {
+                    out.push(text);
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(node) = child {
+                walk(&node, skip, out);
+                child = node.next_sibling();
+            }
+        }
+        let mut out = Vec::new();
+        walk(
+            self.root.upcast_ref::<gtk4::Widget>(),
+            self.moves.upcast_ref::<gtk4::Widget>(),
+            &mut out,
+        );
+        out
     }
 
     pub(crate) fn status_text(&self) -> String {
@@ -441,8 +476,7 @@ impl PlayView {
             Some(worker) => {
                 self.status.set_label("Ready when you are.");
                 self.detail.set_label(&format!(
-                    "Opponent: {} capped near {} Elo. No evaluation is shown while you play; \
-                     your mistakes are collected and offered as puzzles afterwards.",
+                    "{} · capped near {} Elo",
                     worker.name(),
                     self.opponent_elo()
                 ));
@@ -450,10 +484,7 @@ impl PlayView {
             }
             None => {
                 self.status.set_label("No engine found.");
-                self.detail.set_label(
-                    "Install one and restart:  yay -S stockfish\n\
-                     OMACHESS looks for `stockfish` on your PATH.",
-                );
+                self.detail.set_label("yay -S stockfish, then restart.");
                 self.start.set_sensitive(false);
             }
         }
@@ -576,7 +607,7 @@ impl PlayView {
         let said = match outcome {
             Flag::Lost(_) => "Lost on time.",
             Flag::DrawnByInsufficientMaterial(_) => {
-                "Out of time — drawn, the engine cannot mate with what it has left."
+                "Out of time — drawn, the engine cannot mate."
             }
         };
         self.status.set_label(said);
@@ -804,6 +835,91 @@ impl PlayView {
     }
 
     /// Put today's session in the panel while there is no game to describe.
+    /// Put the finished game's figures on the panel.
+    ///
+    /// This was one label holding four paragraphs: accuracy and loss in a
+    /// sentence, the counts in a second, the weakest phase in a third, and two
+    /// more about the clock. Every number in it was real and none of them could
+    /// be found. They are all still here — as four tiles, three bars and one
+    /// line — and the tab is shorter for it.
+    fn show_report(&self, analysis: &GameAnalysis, times: &[std::time::Duration]) {
+        while let Some(child) = self.report_box.first_child() {
+            self.report_box.remove(&child);
+        }
+        if analysis.is_empty() {
+            self.detail.set_label("Too little of the game could be analysed.");
+            self.report_box.set_visible(false);
+            return;
+        }
+        self.detail.set_label("");
+        self.report_box.set_visible(true);
+
+        let counts = analysis.counts();
+        self.report_box.append(&crate::figures::tiles(vec![
+            crate::figures::tile("Accuracy", &format!("{:.0}%", analysis.accuracy()), None),
+            crate::figures::tile(
+                "Given away",
+                &format!("{:.1}%", analysis.mean_loss() * 100.0),
+                None,
+            ),
+            crate::figures::tile("Blunders", &counts.blunders.to_string(), None),
+            crate::figures::tile("Mistakes", &counts.mistakes.to_string(), None),
+        ]));
+
+        // Where the game was lost, as three bars rather than a sentence naming
+        // the worst one. The reader can see the other two are not the problem,
+        // which the sentence never let them do.
+        let phases = analysis.by_phase();
+        if phases.len() >= 2 {
+            let worst = phases
+                .iter()
+                .map(|(_, loss, _)| *loss)
+                .fold(0.0_f64, f64::max)
+                .max(0.0001);
+            let rows: Vec<(String, f64, u32)> = phases
+                .iter()
+                .map(|(phase, loss, moves)| {
+                    (phase.label().to_owned(), loss / worst, *moves as u32)
+                })
+                .collect();
+            self.report_box
+                .append(&crate::figures::section_title("Given away, by phase"));
+            self.report_box.append(&crate::charts::bar_chart(rows, 0.0));
+            self.report_box.append(&crate::figures::stat_line(
+                &phases
+                    .iter()
+                    .map(|(phase, loss, _)| {
+                        format!("{} {:.1}%", phase.label(), loss * 100.0)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("   "),
+            ));
+        }
+
+        // Whether the errors came from moving quickly is a different diagnosis
+        // from not knowing the position, and calls for a different fix. Two
+        // numbers and a verdict say it; four sentences said it before.
+        if let Some(pressure) = time_pressure(&analysis.moves, times) {
+            self.report_box
+                .append(&crate::figures::section_title("Speed against error"));
+            self.report_box.append(&crate::figures::stat_line(&format!(
+                "quick {:.1}%   considered {:.1}%   under {:.0}s",
+                pressure.quick_loss * 100.0,
+                pressure.considered_loss * 100.0,
+                pressure.median_time.as_secs_f64(),
+            )));
+            let verdict = crate::figures::stat_line(if pressure.is_significant() {
+                "rushing is what costs you (p < 0.05)"
+            } else {
+                "no reliable link in this game"
+            });
+            if pressure.is_significant() {
+                verdict.add_css_class("slowing");
+            }
+            self.report_box.append(&verdict);
+        }
+    }
+
     fn show_plan(&self) {
         while let Some(child) = self.plan_box.first_child() {
             self.plan_box.remove(&child);
@@ -823,28 +939,18 @@ impl PlayView {
         heading.add_css_class("heading");
         self.plan_box.append(&heading);
 
+        // The headline names the work and the minutes size it. The reason each
+        // step is there was a sentence apiece underneath, which turned a
+        // three-line session into a page. `omachess today` still gives the
+        // reasoning in full, where there is room to read it.
         for (index, step) in plan.iter().enumerate() {
-            let line = Label::builder()
-                .label(format!(
-                    "{}. {}  ({} min)",
-                    index + 1,
-                    step.headline(),
-                    step.minutes
-                ))
-                .halign(Align::Start)
-                .wrap(true)
-                .build();
+            let line = crate::figures::stat_line(&format!(
+                "{}. {}  ({} min)",
+                index + 1,
+                step.headline(),
+                step.minutes
+            ));
             self.plan_box.append(&line);
-            // The reason is the part worth reading; without it this is a list
-            // of chores rather than a session.
-            let why = Label::builder()
-                .label(&step.why)
-                .halign(Align::Start)
-                .wrap(true)
-                .max_width_chars(56)
-                .build();
-            why.add_css_class("dim-label");
-            self.plan_box.append(&why);
         }
     }
 
@@ -1158,7 +1264,7 @@ impl PlayView {
                 Reply::Review(analysis) => {
                     self.record_game(&analysis);
                     let times = self.move_times.borrow().clone();
-                    self.detail.set_label(&describe(&analysis, &times));
+                    self.show_report(&analysis, &times);
                     let drillable = analysis.drillable().len();
                     let has_moment = analysis.critical_moment().is_some();
                     *self.report.borrow_mut() = Some(analysis);
@@ -1186,8 +1292,7 @@ impl PlayView {
             self.start.set_sensitive(false);
             self.resign.set_visible(false);
             self.detail.set_label(
-                "The engine is no longer running. Restart OMACHESS to play again — \
-                 puzzles and progress are unaffected.",
+                "Engine gone. Restart to play; puzzles and progress are safe.",
             );
         }
     }
@@ -1213,9 +1318,7 @@ impl PlayView {
 
         self.status.set_label("Find the move.");
         self.detail.set_label(&format!(
-            "Move {} is where the game turned — you gave away {:.0}% here. Find the move; \
-             the answer is played for you and then you find the next one, all the way \
-             through the line.",
+            "Move {}   -{:.0}%   the game turned here",
             ply / 2 + 1,
             lost * 100.0
         ));
@@ -1301,7 +1404,7 @@ impl PlayView {
         }
         match (finished, progress) {
             (true, _) => text.push_str(
-                "That is what the position was worth. Add it to training to see it again.",
+                "Add it to training to see it again.",
             ),
             (false, Some((done, total))) => {
                 text.push_str(&format!("Move {} of {total} in the line.", done + 1))
@@ -1424,29 +1527,30 @@ impl PlayView {
                 .margin_end(8)
                 .build();
 
-            let heading = Label::builder()
-                .label(format!(
-                    "Move {} — {}",
-                    review.ply / 2 + 1,
-                    review.severity.map(|s| s.label()).unwrap_or("inaccuracy")
-                ))
-                .halign(Align::Start)
-                .build();
-            heading.add_css_class("heading");
-
-            let detail = Label::builder()
-                .label(format!(
-                    "played {}, better was {} ({:.0}% given away)",
-                    review.played,
-                    review.best,
-                    review.lost() * 100.0
-                ))
-                .halign(Align::Start)
-                .build();
-            detail.add_css_class("dim-label");
-
-            row.append(&heading);
-            row.append(&detail);
+            // One line, in the shape a scoresheet annotation already has:
+            // the move number, what was played, what it cost, what was better.
+            // It was two lines and a sentence, which is three times the ink for
+            // the same four facts.
+            let mark = match review.severity {
+                Some(omachess_core::review::Severity::Blunder) => "??",
+                Some(omachess_core::review::Severity::Mistake) => "?",
+                _ => "?!",
+            };
+            let line = crate::figures::stat_line(&format!(
+                "{}. {}{}   -{:.0}%   best {}",
+                review.ply / 2 + 1,
+                review.played,
+                mark,
+                review.lost() * 100.0,
+                review.best,
+            ));
+            if matches!(
+                review.severity,
+                Some(omachess_core::review::Severity::Blunder)
+            ) {
+                line.add_css_class("slowing");
+            }
+            row.append(&line);
 
             // Clicking a row puts that position on the board.
             let click = gtk4::GestureClick::new();
@@ -1558,58 +1662,6 @@ fn phase_losses(analysis: &GameAnalysis) -> [omachess_core::store::PhaseLoss; 3]
 /// A win against a weak opponent and a loss against a strong one say little
 /// about how well you played. The win probability you gave away per move says
 /// a great deal, and it is comparable between games.
-fn describe(analysis: &GameAnalysis, times: &[std::time::Duration]) -> String {
-    if analysis.is_empty() {
-        return "Not enough of the game could be analysed.".to_owned();
-    }
-    let counts = analysis.counts();
-    let mut text = format!(
-        "Accuracy {:.0}%  ·  {:.1}% given away per move\n{} blunder{}, {} mistake{}, {} inaccurac{}",
-        analysis.accuracy(),
-        analysis.mean_loss() * 100.0,
-        counts.blunders,
-        if counts.blunders == 1 { "" } else { "s" },
-        counts.mistakes,
-        if counts.mistakes == 1 { "" } else { "s" },
-        counts.inaccuracies,
-        if counts.inaccuracies == 1 { "y" } else { "ies" },
-    );
-    // The weakest phase is the single most actionable line in the report.
-    if let Some((phase, loss, moves)) = analysis.by_phase().first() {
-        text.push_str(&format!(
-            "\nWeakest phase: {} ({:.1}% per move over {moves} moves)",
-            phase.label(),
-            loss * 100.0
-        ));
-    }
-
-    // Whether the errors came from moving quickly is a different diagnosis from
-    // not knowing the position, and calls for a different fix.
-    if let Some(pressure) = time_pressure(&analysis.moves, times) {
-        let seconds = |d: std::time::Duration| d.as_secs_f64();
-        text.push_str(&format!(
-            "\n\nQuick moves (under {:.0}s) gave away {:.1}% each; \
-             considered moves {:.1}%.",
-            seconds(pressure.median_time),
-            pressure.quick_loss * 100.0,
-            pressure.considered_loss * 100.0,
-        ));
-        if let (Some(error), Some(clean)) = (pressure.error_time, pressure.clean_time) {
-            text.push_str(&format!(
-                "\nYour errors took {:.0}s to play; your sound moves {:.0}s.",
-                seconds(error),
-                seconds(clean)
-            ));
-        }
-        text.push_str(if pressure.is_significant() {
-            "\nYour mistakes really are concentrated in the moves you rush (p < 0.05). Slowing down would cost you less than studying more tactics."
-        } else {
-            "\nNo reliable link between speed and error in this game."
-        });
-    }
-    text
-}
-
 /// Standard piece values, used only for the material readout.
 /// Replay one move onto a FEN, giving the position the player actually faced.
 /// Opt-in tracing, so a move that does not happen can be explained rather than

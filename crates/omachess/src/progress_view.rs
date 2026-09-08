@@ -12,6 +12,7 @@ use omachess_core::progress::{
 };
 
 use crate::charts;
+use crate::figures::{caption, section_title, stat_line, tile};
 
 /// Everything the page needs, gathered once.
 pub struct ProgressData {
@@ -217,60 +218,25 @@ fn direction(t: &Transfer) -> &'static str {
 
 /// The headline numbers, side by side.
 fn tiles(data: &ProgressData) -> GtkBox {
-    let row = GtkBox::builder()
-        .orientation(Orientation::Horizontal)
-        .spacing(28)
-        .build();
-    row.append(&tile("Solved", &data.solved.to_string(), None));
-    row.append(&tile("Attempts", &data.ratings.len().to_string(), None));
-    row.append(&tile(
-        "Accuracy",
-        &format!("{:.0}%", data.baseline_success * 100.0),
-        None,
-    ));
     let now = data.ratings.last().copied().unwrap_or(0.0);
     let first = data.ratings.first().copied().unwrap_or(0.0);
-    let delta = now - first;
-    row.append(&tile(
-        "Rating",
-        &format!("{now:.0}"),
-        (data.ratings.len() >= 2).then(|| format!("{:+.0}", delta)),
-    ));
-    row
-}
-
-fn tile(name: &str, value: &str, delta: Option<String>) -> GtkBox {
-    let cell = GtkBox::builder()
-        .orientation(Orientation::Vertical)
-        .spacing(1)
-        .build();
-    let label = Label::builder().label(name).halign(Align::Start).build();
-    label.add_css_class("dim-label");
-    label.add_css_class("omachess-tile-label");
-    let figure = Label::builder().label(value).halign(Align::Start).build();
-    figure.add_css_class("omachess-tile");
-    cell.append(&label);
-    cell.append(&figure);
-    if let Some(delta) = delta {
-        let change = Label::builder().label(&delta).halign(Align::Start).build();
-        change.add_css_class("omachess-tile-label");
-        change.add_css_class(if delta.starts_with('-') {
-            "slowing"
-        } else {
-            "improving"
-        });
-        cell.append(&change);
-    }
-    cell
+    crate::figures::tiles(vec![
+        tile("Solved", &data.solved.to_string(), None),
+        tile("Attempts", &data.ratings.len().to_string(), None),
+        tile(
+            "Accuracy",
+            &format!("{:.0}%", data.baseline_success * 100.0),
+            None,
+        ),
+        tile(
+            "Rating",
+            &format!("{now:.0}"),
+            (data.ratings.len() >= 2).then(|| format!("{:+.0}", now - first)),
+        ),
+    ])
 }
 
 /// One line of numbers, monospaced so columns line up down the page.
-fn stat_line(text: &str) -> Label {
-    let label = Label::builder().label(text).halign(Align::Start).build();
-    label.add_css_class("omachess-stat");
-    label
-}
-
 /// What is not measurable yet, as counters rather than paragraphs.
 ///
 /// "Needs twelve first encounters within a single rating band before the
@@ -409,26 +375,6 @@ fn efficiency_text(best: Option<u32>, optimal: Option<u32>) -> String {
         _ => String::new(),
     }
 }
-
-fn section_title(text: &str) -> Label {
-    let label = Label::builder().label(text).halign(Align::Start).build();
-    label.add_css_class("title-4");
-    label
-}
-
-fn caption(text: &str) -> Label {
-    let label = Label::builder()
-        .label(text)
-        .halign(Align::Start)
-        .wrap(true)
-        .max_width_chars(74)
-        .build();
-    label.add_css_class("dim-label");
-    label
-}
-
-
-
 
 /// How the engine games have gone, which is a separate question from how the
 /// puzzles have gone and is held to a weaker standard of evidence.
