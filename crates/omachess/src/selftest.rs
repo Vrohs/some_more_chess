@@ -1413,6 +1413,56 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         )
     }));
 
+    // "Not even sure what's going on." Three different kinds of question
+    // arrived in one sitting — memorise a position, then find hanging pieces
+    // — because the rung changed underneath him, and nothing on screen said a
+    // ladder existed, that he was on it, or that he had just been moved.
+    checks.push(check("board vision says where you are on the ladder", || {
+        use omachess_core::vision::Rung;
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        store.borrow().set_vision_rung("hanging").map_err(|e| e.to_string())?;
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
+        trainer.choose_mode("vision");
+
+        let said = trainer.mode_caption_text();
+        expect(
+            said.contains("Rung") && said.contains(&Rung::LADDER.len().to_string()),
+            &format!("the tab did not say which rung of how many: {said:?}"),
+        )?;
+        expect(
+            said.contains(Rung::Hanging.label()),
+            &format!("the tab did not name the drill: {said:?}"),
+        )
+    }));
+
+    checks.push(check("a change of rung is said, not slipped in", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        store.borrow().set_vision_rung("hanging").map_err(|e| e.to_string())?;
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
+        trainer.choose_mode("vision");
+
+        // Wrong until it gives way.
+        for _ in 0..omachess_core::vision::FALL_AFTER {
+            expect(
+                pump(10, || !trainer.vision_prompt().is_empty()),
+                "no drill was dealt to answer",
+            )?;
+            if let Some(side) = trainer.vision_side_for(false) {
+                trainer.press_vision(side);
+            } else {
+                trainer.press_vision_check();
+            }
+        }
+
+        let said = trainer.status_text();
+        expect(
+            said.to_lowercase().contains("rung"),
+            &format!(
+                "the rung changed and the question did not say so: {said:?}"
+            ),
+        )
+    }));
+
     // --- calculate: the line before the board moves ------------------------
     //
     // The puzzle trainer answers one move at a time, immediately, which lets a

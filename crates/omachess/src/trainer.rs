@@ -603,6 +603,10 @@ impl Trainer {
         self.set_mode(mode);
     }
 
+    pub(crate) fn mode_caption_text(&self) -> String {
+        self.mode_caption.text().to_string()
+    }
+
     pub(crate) fn status_text(&self) -> String {
         self.status.text().to_string()
     }
@@ -974,15 +978,31 @@ impl Trainer {
             if let Err(e) = self.store.borrow().set_vision_rung(to.key()) {
                 omachess_core::diagnostics::record_error("trainer::rung", e);
             }
-            self.lesson.set_label(&format!(
-                "{} — now: {}",
-                describe_answer(&current.drill),
+            // In the status line, where the question itself is, rather than
+            // appended to the answer where it was missed entirely. The
+            // question is about to change kind, and being told after the fact
+            // is how the whole mode became incomprehensible.
+            let direction = if rung_number(to) > rung_number(rung) {
+                "Up to"
+            } else {
+                "Back to"
+            };
+            self.status.set_label(&format!(
+                "{direction} rung {} — {}",
+                rung_number(to),
                 to.label()
             ));
         }
 
+        // Longer when the rung changed: the next question is a different kind
+        // of question and arriving at it unannounced is the whole complaint.
+        let pause = match (moved.is_some(), right) {
+            (true, _) => 3500,
+            (false, true) => 500,
+            (false, false) => 2200,
+        };
         let weak: Weak<Self> = Rc::downgrade(self);
-        glib::timeout_add_local_once(std::time::Duration::from_millis(if right { 500 } else { 2200 }), move || {
+        glib::timeout_add_local_once(std::time::Duration::from_millis(pause), move || {
             if let Some(trainer) = weak.upgrade() {
                 if trainer.store.borrow().train_mode().unwrap_or_default() == "vision" {
                     trainer.next_vision();
@@ -1000,13 +1020,19 @@ impl Trainer {
                 .borrow()
                 .vision_record(rung.key())
                 .unwrap_or((0, 0));
+            // Where you are, at all times. Three different kinds of question
+            // arrived in one sitting with nothing on screen saying a ladder
+            // existed, that he was on it, or that he had just been moved.
+            let place = format!(
+                "Rung {} of {} · {}",
+                rung_number(rung),
+                Rung::LADDER.len(),
+                rung.label()
+            );
             self.mode_caption.set_label(&if asked == 0 {
-                format!("{} — {} of 6.", rung.label(), rung_number(rung))
+                place
             } else {
-                format!(
-                    "{} — {right} of {asked} right.",
-                    rung.label()
-                )
+                format!("{place} · {right} of {asked} right")
             });
             return;
         }
