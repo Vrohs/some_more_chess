@@ -1316,6 +1316,43 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         )
     }));
 
+    // "It's easy and doesn't feel like learning." It started at "is f6 light
+    // or dark", which for someone who already knows the board is a quiz, and
+    // twenty of them before anything interesting happens is how a ladder gets
+    // abandoned. It starts at the hard end and falls to where it hurts.
+    checks.push(check("board vision starts hard and gives way", || {
+        use omachess_core::vision::Rung;
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
+        trainer.choose_mode("vision");
+
+        let opening = store.borrow().vision_rung().map_err(|e| e.to_string())?;
+        expect(
+            opening == Rung::opening_rung().key(),
+            &format!("board vision opened on {opening:?}, not the hard end"),
+        )?;
+
+        // Get them wrong until it gives way. The gate is five, so this must
+        // not take twenty.
+        for _ in 0..omachess_core::vision::FALL_AFTER {
+            expect(
+                pump(10, || !trainer.vision_prompt().is_empty()),
+                "no drill was dealt to answer",
+            )?;
+            if let Some(side) = trainer.vision_side_for(false) {
+                trainer.press_vision(side);
+            } else {
+                // A clicking rung: commit nothing, which is wrong.
+                trainer.press_vision_check();
+            }
+        }
+        let after = store.borrow().vision_rung().map_err(|e| e.to_string())?;
+        expect(
+            after != opening,
+            &format!("five wrong answers left it on {after:?}, which is a wall"),
+        )
+    }));
+
     // --- the ladder below calculation --------------------------------------
     //
     // He cannot visualise: plays on instinct, reacts, would lose to a serious
@@ -1325,6 +1362,8 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
     // the application depends on.
     checks.push(check("board vision asks a question and takes an answer", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
+        // Pinned: this checks the recording, not where the ladder opens.
+        store.borrow().set_vision_rung("colour").map_err(|e| e.to_string())?;
         let trainer = Trainer::new(store.clone(), pieces.clone(), None);
         trainer.choose_mode("vision");
 
@@ -1351,6 +1390,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
 
     checks.push(check("a wrong answer in board vision is refused", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
+        store.borrow().set_vision_rung("colour").map_err(|e| e.to_string())?;
         let trainer = Trainer::new(store.clone(), pieces.clone(), None);
         trainer.choose_mode("vision");
         let side = trainer
@@ -1374,16 +1414,20 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
     // the transfer measure the whole application rests on.
     checks.push(check("board vision never touches the puzzle record", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
+        store.borrow().set_vision_rung("colour").map_err(|e| e.to_string())?;
         let before = store.borrow().solved_count().map_err(|e| e.to_string())?;
         let trainer = Trainer::new(store.clone(), pieces.clone(), None);
         trainer.choose_mode("vision");
 
         for _ in 0..8 {
+            // The next drill arrives on a timer, so wait for it rather than
+            // guessing how long it takes.
+            if !pump(10, || !trainer.vision_prompt().is_empty()) {
+                break;
+            }
             if let Some(side) = trainer.vision_side_for(true) {
                 trainer.press_vision(side);
             }
-            // The next drill arrives on a timer, so let the loop turn.
-            pump(2, || false);
         }
 
         let (asked, _) = store

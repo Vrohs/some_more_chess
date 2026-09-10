@@ -20,7 +20,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use shakmaty::{attacks, Bitboard, Board, Color, Piece, Role, Square};
+use shakmaty::{attacks, Bitboard, Board, Chess, Color, Piece, Position, Role, Square};
 
 /// A step on the ladder. The order is the order they are climbed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,17 +37,32 @@ pub enum Rung {
     IsAttacked,
     /// A move given in notation, the board left where it was.
     AfterOneMove,
+    /// A real position: which of your pieces are hanging?
+    Hanging,
+    /// A real position, shown and then taken away.
+    Recall,
 }
 
 impl Rung {
-    pub const LADDER: [Rung; 6] = [
+    pub const LADDER: [Rung; 8] = [
         Rung::SquareColour,
         Rung::FindSquare,
         Rung::KnightReach,
         Rung::LineReach,
         Rung::IsAttacked,
         Rung::AfterOneMove,
+        Rung::Hanging,
+        Rung::Recall,
     ];
+
+    /// Whether this rung needs a real position rather than an arrangement made
+    /// up for it. A lone knight on an empty board is a geometry exercise; the
+    /// same question asked of a game you might actually be playing is chess,
+    /// and the difference is most of why the low rungs do not feel like
+    /// learning anything.
+    pub fn wants_a_real_position(self) -> bool {
+        matches!(self, Rung::Hanging | Rung::Recall)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -57,6 +72,8 @@ impl Rung {
             Rung::LineReach => "Line pieces",
             Rung::IsAttacked => "Is it attacked?",
             Rung::AfterOneMove => "One move ahead",
+            Rung::Hanging => "What is hanging",
+            Rung::Recall => "From memory",
         }
     }
 
@@ -69,6 +86,8 @@ impl Rung {
             Rung::LineReach => "line",
             Rung::IsAttacked => "attacked",
             Rung::AfterOneMove => "ahead",
+            Rung::Hanging => "hanging",
+            Rung::Recall => "recall",
         }
     }
 
@@ -79,6 +98,22 @@ impl Rung {
     pub fn next(self) -> Option<Rung> {
         let at = Rung::LADDER.iter().position(|r| *r == self)?;
         Rung::LADDER.get(at + 1).copied()
+    }
+
+    pub fn previous(self) -> Option<Rung> {
+        let at = Rung::LADDER.iter().position(|r| *r == self)?;
+        at.checked_sub(1).and_then(|below| Rung::LADDER.get(below).copied())
+    }
+
+    /// Where somebody starts who has never done this.
+    ///
+    /// The top, not the bottom. Asking a player who already knows the board
+    /// whether f6 is light is a quiz, not learning, and twenty of them before
+    /// anything interesting happens is how a ladder gets abandoned. Starting
+    /// at the hardest rung and falling to where it hurts takes a handful of
+    /// questions and lands on the edge of what they can actually do.
+    pub fn opening_rung() -> Rung {
+        *Rung::LADDER.last().expect("the ladder is not empty")
     }
 
     /// How long an answer may take and still count as seeing it.
@@ -92,8 +127,29 @@ impl Rung {
             Rung::KnightReach | Rung::LineReach => Duration::from_secs(12),
             Rung::IsAttacked => Duration::from_secs(6),
             Rung::AfterOneMove => Duration::from_secs(20),
+            Rung::Hanging => Duration::from_secs(25),
+            Rung::Recall => Duration::from_secs(15),
         }
     }
+}
+
+/// Whether the rung is now too hard, and the ladder should step down.
+///
+/// Deliberately quicker to fall than to climb — five bad answers is enough to
+/// know, twenty good ones are needed to move up. Being stuck one rung too high
+/// is miserable and teaches nothing; being one too low costs a minute.
+pub const FALL_AFTER: usize = 5;
+
+pub fn should_step_down(recent: &[(bool, Duration)], rung: Rung) -> bool {
+    if recent.len() < FALL_AFTER {
+        return false;
+    }
+    let last: &[(bool, Duration)] = &recent[recent.len() - FALL_AFTER..];
+    let right = last.iter().filter(|(correct, _)| *correct).count();
+    if right * 2 < FALL_AFTER {
+        return true;
+    }
+    median(&last.iter().map(|(_, took)| *took).collect::<Vec<_>>()) > rung.target() * 2
 }
 
 /// What the solver said.
@@ -156,6 +212,16 @@ fn median(times: &[Duration]) -> Duration {
 
 /// Deal a question. Seeded, so a run can be reproduced exactly.
 pub fn next(rung: Rung, seed: u64) -> Drill {
+    next_on(rung, seed, None)
+}
+
+/// Deal a question, on a real position where the rung wants one.
+///
+/// `sample` is a position out of the player's own corpus. Without it the hard
+/// rungs fall back to something made up, which still works and still teaches
+/// less: the whole point of asking "what is hanging" is that it is the
+/// question you failed to ask in a real game.
+pub fn next_on(rung: Rung, seed: u64, sample: Option<&Chess>) -> Drill {
     let mut rng = Rng(seed ^ 0x9E37_79B9_7F4A_7C15);
     match rung {
         Rung::SquareColour => {
@@ -280,7 +346,83 @@ pub fn next(rung: Rung, seed: u64) -> Drill {
                 answer: Answer::Squares(squares(attacks::attacks(to, white(role), after))),
             }
         }
+        Rung::Hanging => {
+            let position = sample.cloned().unwrap_or_default();
+            let mover = position.turn();
+            Drill {
+                rung,
+                prompt: format!(
+                    "{} to play. Click every {} piece that is hanging.",
+                    side_name(mover),
+                    side_name(mover).to_lowercase()
+                ),
+                board: position.board().clone(),
+                shown_move: None,
+                answer: Answer::Squares(hanging(&position, mover)),
+            }
+        }
+        Rung::Recall => {
+            let position = sample.cloned().unwrap_or_default();
+            let board = position.board().clone();
+            // Ask about a piece that is actually on the board, and prefer one
+            // there is only one of, so the answer is a single square.
+            let mut candidates: Vec<(Square, Piece)> = Vec::new();
+            for square in Square::ALL {
+                if let Some(piece) = board.piece_at(square) {
+                    if matches!(piece.role, Role::Queen | Role::King | Role::Rook) {
+                        candidates.push((square, piece));
+                    }
+                }
+            }
+            candidates.sort_by_key(|(square, _)| *square as u32);
+            let (square, piece) = candidates
+                .get(rng.below(candidates.len().max(1) as u64) as usize)
+                .copied()
+                .unwrap_or((Square::E1, white(Role::King)));
+            Drill {
+                rung,
+                prompt: format!(
+                    "Look, then it goes. Click where the {} {} was.",
+                    side_name(piece.color).to_lowercase(),
+                    name(piece.role).to_lowercase()
+                ),
+                board,
+                shown_move: None,
+                answer: Answer::Squares(BTreeSet::from([square])),
+            }
+        }
     }
+}
+
+fn side_name(color: Color) -> &'static str {
+    match color {
+        Color::White => "White",
+        Color::Black => "Black",
+    }
+}
+
+/// Pieces of `side` that the other side attacks and `side` does not defend.
+///
+/// The question every instinct player forgets to ask, and the one that decides
+/// most games below master level.
+pub fn hanging(position: &Chess, side: Color) -> BTreeSet<Square> {
+    let board = position.board();
+    let occupied = board.occupied();
+    let mut out = BTreeSet::new();
+    for square in Square::ALL {
+        let Some(piece) = board.piece_at(square) else {
+            continue;
+        };
+        if piece.color != side || piece.role == Role::King {
+            continue;
+        }
+        let attacked = !board.attacks_to(square, side.other(), occupied).is_empty();
+        let defended = !board.attacks_to(square, side, occupied).is_empty();
+        if attacked && !defended {
+            out.insert(square);
+        }
+    }
+    out
 }
 
 fn white(role: Role) -> Piece {
@@ -476,12 +618,52 @@ mod tests {
     }
 
     /// Different seeds ask different things, or it is one question forever.
+    ///
+    /// The rungs that want a real position get their variety from the corpus
+    /// rather than from the seed — asked without one they are the starting
+    /// position every time, which is exactly what the caller must not do.
     #[test]
     fn the_ladder_does_not_ask_the_same_thing_every_time() {
         for rung in Rung::LADDER {
+            if rung.wants_a_real_position() {
+                continue;
+            }
             let asked: BTreeSet<String> =
                 (0..50u64).map(|seed| next(rung, seed).prompt).collect();
             assert!(asked.len() > 5, "{rung:?} only asked {} things", asked.len());
+        }
+    }
+
+    /// And with positions supplied, they do vary — otherwise handing them a
+    /// corpus would change nothing.
+    #[test]
+    fn a_real_position_is_what_makes_the_hard_rungs_vary() {
+        use shakmaty::fen::Fen;
+        use shakmaty::CastlingMode;
+        let boards: Vec<Chess> = [
+            "4k3/8/8/3n4/8/8/8/3RK3 b - - 0 1",
+            "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+            "8/5k2/8/8/3Q4/8/5K2/7r w - - 0 1",
+        ]
+        .iter()
+        .map(|fen| {
+            fen.parse::<Fen>()
+                .unwrap()
+                .into_position::<Chess>(CastlingMode::Standard)
+                .unwrap()
+        })
+        .collect();
+
+        for rung in Rung::LADDER.iter().filter(|r| r.wants_a_real_position()) {
+            let asked: BTreeSet<String> = boards
+                .iter()
+                .enumerate()
+                .map(|(seed, board)| next_on(*rung, seed as u64, Some(board)).prompt)
+                .collect();
+            assert!(
+                asked.len() > 1,
+                "{rung:?} asked the same thing of three different positions"
+            );
         }
     }
 
@@ -534,5 +716,128 @@ mod tests {
             .map(|seed| next(rung, seed))
             .find(|drill| want(drill))
             .expect("no seed produced the wanted drill")
+    }
+}
+
+#[cfg(test)]
+mod harder_rungs {
+    use super::*;
+    use shakmaty::fen::Fen;
+    use shakmaty::CastlingMode;
+
+    fn position(fen: &str) -> Chess {
+        fen.parse::<Fen>()
+            .expect("a legal fen")
+            .into_position(CastlingMode::Standard)
+            .expect("a legal position")
+    }
+
+    fn sq(name: &str) -> Square {
+        name.parse().expect("a square")
+    }
+
+    /// Attacked and undefended, which is not the same as attacked. Getting
+    /// this wrong would teach the player to count defended pieces as losses.
+    #[test]
+    fn hanging_means_attacked_and_not_defended() {
+        // Black knight on d5 attacked by the white rook on d1. Nothing of
+        // Black's defends it, so it hangs.
+        let bare = position("4k3/8/8/3n4/8/8/8/3RK3 b - - 0 1");
+        assert_eq!(
+            hanging(&bare, Color::Black),
+            BTreeSet::from([sq("d5")]),
+            "an attacked, undefended knight"
+        );
+
+        // The same knight, now defended by a pawn on c6. Still attacked, no
+        // longer hanging.
+        let held = position("4k3/8/2p5/3n4/8/8/8/3RK3 b - - 0 1");
+        assert!(
+            hanging(&held, Color::Black).is_empty(),
+            "a defended piece is not hanging: {:?}",
+            hanging(&held, Color::Black)
+        );
+
+        // Nothing attacking it at all.
+        let quiet = position("4k3/8/8/3n4/8/8/8/4K3 b - - 0 1");
+        assert!(quiet_is_empty(&quiet), "an unattacked piece is not hanging");
+    }
+
+    fn quiet_is_empty(position: &Chess) -> bool {
+        hanging(position, Color::Black).is_empty()
+    }
+
+    /// The king is never "hanging" — it cannot be taken, and reporting it
+    /// would make every check look like a lost piece.
+    #[test]
+    fn the_king_is_never_hanging() {
+        let checked = position("4k3/8/8/8/8/8/8/4RK2 b - - 0 1");
+        assert!(
+            hanging(&checked, Color::Black).is_empty(),
+            "the king was reported as hanging"
+        );
+    }
+
+    /// Recall asks about a piece that is actually there, and wants one square.
+    #[test]
+    fn recall_asks_about_a_piece_on_the_board() {
+        let start = Chess::default();
+        for seed in 0..100u64 {
+            let drill = next_on(Rung::Recall, seed, Some(&start));
+            let Answer::Squares(want) = &drill.answer else {
+                panic!("recall should want a square");
+            };
+            assert_eq!(want.len(), 1, "one square, not {}", want.len());
+            let square = *want.iter().next().unwrap();
+            assert!(
+                drill.board.piece_at(square).is_some(),
+                "seed {seed}: asked about an empty square"
+            );
+        }
+    }
+
+    /// The ladder starts at the top. Somebody who already knows the board
+    /// should not answer twenty "is f6 light" before anything happens.
+    #[test]
+    fn the_ladder_opens_at_the_hard_end() {
+        assert_eq!(Rung::opening_rung(), Rung::Recall);
+        assert_eq!(Rung::opening_rung().next(), None);
+        assert_eq!(Rung::SquareColour.previous(), None);
+        assert_eq!(Rung::FindSquare.previous(), Some(Rung::SquareColour));
+    }
+
+    /// Quicker to fall than to climb, and neither on a handful of answers.
+    #[test]
+    fn a_rung_that_is_too_hard_gives_way() {
+        let quick = Duration::from_secs(1);
+        let slow = Duration::from_secs(120);
+
+        let mostly_wrong: Vec<_> = (0..FALL_AFTER).map(|_| (false, quick)).collect();
+        assert!(should_step_down(&mostly_wrong, Rung::Recall));
+
+        let right_but_crawling: Vec<_> = (0..FALL_AFTER).map(|_| (true, slow)).collect();
+        assert!(
+            should_step_down(&right_but_crawling, Rung::Recall),
+            "two minutes an answer is too hard even when it is right"
+        );
+
+        let fine: Vec<_> = (0..FALL_AFTER).map(|_| (true, quick)).collect();
+        assert!(!should_step_down(&fine, Rung::Recall));
+
+        let too_few: Vec<_> = (0..FALL_AFTER - 1).map(|_| (false, quick)).collect();
+        assert!(!should_step_down(&too_few, Rung::Recall), "two answers is not a verdict");
+
+        // Falling must be quicker than climbing, or a rung one too high is a
+        // wall rather than a step.
+        const _: () = assert!(FALL_AFTER < NEEDED);
+    }
+
+    /// Both new rungs want a real position, and say so.
+    #[test]
+    fn the_hard_rungs_ask_for_a_real_position() {
+        assert!(Rung::Hanging.wants_a_real_position());
+        assert!(Rung::Recall.wants_a_real_position());
+        assert!(!Rung::SquareColour.wants_a_real_position());
+        assert!(!Rung::AfterOneMove.wants_a_real_position());
     }
 }

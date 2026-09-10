@@ -565,20 +565,47 @@ impl Trainer {
             .expect("the answer buttons live in a row")
     }
 
+    /// A position out of the corpus to ask about.
+    fn sample_position(&self) -> Option<shakmaty::Chess> {
+        let target = self
+            .store
+            .borrow()
+            .personal_rating()
+            .unwrap_or(1200.0)
+            .round()
+            .max(0.0) as u32;
+        let puzzle = self
+            .store
+            .borrow()
+            .unseen_near_rating(target, None)
+            .ok()
+            .flatten()?;
+        // The position the solver would face, one move in, as everywhere else.
+        let fen = omachess_core::playout::position_to_play(&puzzle)?;
+        fen.parse::<shakmaty::fen::Fen>()
+            .ok()?
+            .into_position(shakmaty::CastlingMode::Standard)
+            .ok()
+    }
+
     fn rung(&self) -> Rung {
         self.store
             .borrow()
             .vision_rung()
             .ok()
             .and_then(|key| Rung::from_key(&key))
-            .unwrap_or(Rung::SquareColour)
+            .unwrap_or_else(Rung::opening_rung)
     }
 
     /// Deal the next board-vision question.
     fn next_vision(&self) {
         let rung = self.rung();
         let seed = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
-        let drill = omachess_core::vision::next(rung, seed);
+        // The hard rungs ask about a real game, because "what is hanging" is
+        // only worth asking of a position you might actually be sitting in.
+        // Without one they would be the starting position every time.
+        let sample = rung.wants_a_real_position().then(|| self.sample_position()).flatten();
+        let drill = omachess_core::vision::next_on(rung, seed, sample.as_ref());
 
         self.board.set_orientation(shakmaty::Color::White);
         self.board.set_board(&drill.board);
@@ -694,14 +721,26 @@ impl Trainer {
             .borrow()
             .vision_recent(rung.key(), NEEDED as u32)
             .unwrap_or_default();
-        if omachess_core::vision::ready_to_promote(&recent, rung) {
-            if let Some(up) = rung.next() {
-                if let Err(e) = self.store.borrow().set_vision_rung(up.key()) {
-                    omachess_core::diagnostics::record_error("trainer::promote", e);
-                }
-                self.lesson
-                    .set_label(&format!("{} — next: {}", describe_answer(&current.drill), up.label()));
+        // Climbs when the rung is done with, and steps down when it is over
+        // his head — the ladder finds the level rather than being climbed from
+        // the bottom, because starting a player who knows the board on "is f6
+        // light" is a quiz and not learning.
+        let moved = if omachess_core::vision::ready_to_promote(&recent, rung) {
+            rung.next()
+        } else if omachess_core::vision::should_step_down(&recent, rung) {
+            rung.previous()
+        } else {
+            None
+        };
+        if let Some(to) = moved {
+            if let Err(e) = self.store.borrow().set_vision_rung(to.key()) {
+                omachess_core::diagnostics::record_error("trainer::rung", e);
             }
+            self.lesson.set_label(&format!(
+                "{} — now: {}",
+                describe_answer(&current.drill),
+                to.label()
+            ));
         }
 
         let weak: Weak<Self> = Rc::downgrade(self);

@@ -1841,9 +1841,15 @@ impl Store {
         self.set_train_mode(if on { "repeat" } else { "learn" })
     }
 
-    /// The rung the ladder has been climbed to.
+    /// Which rung the ladder is on.
+    ///
+    /// The hard end until something is stored, so a player who already knows
+    /// the board is not asked twenty times whether f6 is light before anything
+    /// happens. It falls to where it hurts on its own.
     pub fn vision_rung(&self) -> Result<String> {
-        Ok(self.setting("vision_rung")?.unwrap_or_else(|| "colour".to_owned()))
+        Ok(self
+            .setting("vision_rung")?
+            .unwrap_or_else(|| crate::vision::Rung::opening_rung().key().to_owned()))
     }
 
     pub fn set_vision_rung(&self, rung: &str) -> Result<()> {
