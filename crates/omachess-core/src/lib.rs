@@ -5,6 +5,7 @@
 //! claim about measuring improvement — can be tested in isolation.
 
 pub mod backup;
+pub mod calculate;
 pub mod clock;
 pub mod diagnostics;
 pub mod drill;

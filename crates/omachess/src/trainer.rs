@@ -14,7 +14,7 @@ use omachess_core::session::{Session, Solve};
 use omachess_core::store::Store;
 use omachess_core::vision::{Answer, Rung, NEEDED};
 use shakmaty::san::San;
-use shakmaty::{Move, Position, Square};
+use shakmaty::{Chess, Move, Position, Square};
 
 use crate::board::BoardView;
 use crate::engine_worker::{EngineWorker, Reply, Request};
@@ -27,12 +27,13 @@ use crate::progress_view::ProgressData;
 const LESSON_DEPTH: u32 = 18;
 
 /// The three ways the tab works, in the order the picker lists them.
-const MODES: [&str; 3] = ["Learn", "Repeat & measure", "Board vision"];
+const MODES: [&str; 4] = ["Learn", "Repeat & measure", "Board vision", "Calculate"];
 
 fn mode_key(index: u32) -> &'static str {
     match index {
         1 => "repeat",
         2 => "vision",
+        3 => "calculate",
         _ => "learn",
     }
 }
@@ -45,6 +46,7 @@ fn mode_index(key: &str) -> u32 {
     match key {
         "repeat" => 1,
         "vision" => 2,
+        "calculate" => 3,
         _ => 0,
     }
 }
@@ -122,6 +124,10 @@ pub struct Trainer {
     vision_done: Button,
     /// The drill on screen, when the tab is doing board vision.
     vision: RefCell<Option<VisionDrill>>,
+    line_entry: gtk4::Entry,
+    commit: Button,
+    /// The position being calculated, and when it was put up.
+    calculating: RefCell<Option<(Puzzle, Chess, Instant)>>,
     /// What the solver actually played here, once it can be shown.
     origin: Label,
     mode_caption: Label,
@@ -230,6 +236,22 @@ impl Trainer {
         // Timing cannot begin before the solver is looking, so the position is
         // withheld until this is pressed. Showing it first would let anyone
         // solve at leisure and then start the clock.
+        // Calculate: the line is written here and the board does not move
+        // until it is committed. The first text entry in the application.
+        let line_entry = gtk4::Entry::builder()
+            .placeholder_text("Rxb8+ Kxb8 Qd8#")
+            .hexpand(true)
+            .build();
+        let commit = Button::with_label("Commit");
+        commit.add_css_class("suggested-action");
+        let calc_row = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(6)
+            .build();
+        calc_row.append(&line_entry);
+        calc_row.append(&commit);
+        calc_row.set_visible(false);
+
         let start = Button::with_label("Start");
         start.add_css_class("suggested-action");
 
@@ -250,6 +272,7 @@ impl Trainer {
         header.append(&mode_row);
         header.append(&status);
         header.append(&vision_row);
+        header.append(&calc_row);
         header.append(&mode_caption);
         header.append(&origin);
         header.append(&lesson);
@@ -308,6 +331,9 @@ impl Trainer {
             vision_b,
             vision_done,
             vision: RefCell::new(None),
+            line_entry,
+            commit,
+            calculating: RefCell::new(None),
             origin,
             mode_caption,
             start,
@@ -370,6 +396,20 @@ impl Trainer {
                 }
             });
         }
+        let weak: Weak<Self> = Rc::downgrade(&trainer);
+        trainer.commit.connect_clicked(move |_| {
+            if let Some(trainer) = weak.upgrade() {
+                trainer.commit_line();
+            }
+        });
+        // Enter commits, because a line is typed and typists press Enter.
+        let weak: Weak<Self> = Rc::downgrade(&trainer);
+        trainer.line_entry.connect_activate(move |_| {
+            if let Some(trainer) = weak.upgrade() {
+                trainer.commit_line();
+            }
+        });
+
         let weak: Weak<Self> = Rc::downgrade(&trainer);
         trainer.vision_done.connect_clicked(move |_| {
             if let Some(trainer) = weak.upgrade() {
@@ -485,6 +525,30 @@ impl Trainer {
         self.mode_pick.is_visible() && self.mode_pick.parent().is_some()
     }
 
+    /// Test hooks for calculate mode.
+    pub(crate) fn write_line(&self, line: &str) {
+        self.line_entry.set_text(line);
+    }
+
+    pub(crate) fn press_commit(self: &Rc<Self>) {
+        self.commit_line();
+    }
+
+    /// The solution to the position being calculated, in the notation the
+    /// solver would write.
+    pub(crate) fn calculation_answer(&self) -> Vec<String> {
+        let held = self.calculating.borrow();
+        let Some((puzzle, position, _)) = held.as_ref() else {
+            return Vec::new();
+        };
+        let line: Vec<String> = puzzle.moves.iter().skip(1).cloned().collect();
+        omachess_core::game::line_to_san(position, &line)
+    }
+
+    pub(crate) fn calculating(&self) -> bool {
+        self.calculating.borrow().is_some()
+    }
+
     /// Test hooks for the vision ladder.
     pub(crate) fn vision_prompt(&self) -> String {
         self.vision
@@ -543,6 +607,134 @@ impl Trainer {
     /// Switch between learning new material and re-testing solved material.
      /// Say plainly which mode is on and what it does, so the distinction is
     /// never a hidden detail.
+    /// Put up a position to be calculated, with the board frozen.
+    fn next_calculation(&self) {
+        let target = self
+            .store
+            .borrow()
+            .personal_rating()
+            .unwrap_or(1200.0)
+            .round()
+            .max(0.0) as u32;
+        // A line worth writing out. A mate in one is not calculation.
+        let picked = ["long", "mateIn2", "mateIn3"]
+            .into_iter()
+            .find_map(|theme| {
+                self.store
+                    .borrow()
+                    .unseen_near_rating(target, Some(theme))
+                    .ok()
+                    .flatten()
+            })
+            .or_else(|| {
+                self.store
+                    .borrow()
+                    .unseen_near_rating(target, None)
+                    .ok()
+                    .flatten()
+            });
+        let Some(puzzle) = picked else {
+            self.status.set_label("No puzzles loaded to calculate on.");
+            return;
+        };
+        let Ok(attempt) = Attempt::new(&puzzle) else {
+            self.status.set_label("Skipping an unreadable puzzle.");
+            return;
+        };
+        let position = attempt.position().clone();
+
+        self.board.set_orientation(position.turn());
+        self.board.set_position(&position);
+        self.board.set_marks(&[]);
+        self.board.select(None);
+        self.board.set_last_move(None);
+        self.board.set_check(check_square(&position));
+        self.board.set_mate(None);
+
+        let side = match position.turn() {
+            shakmaty::Color::White => "White",
+            shakmaty::Color::Black => "Black",
+        };
+        self.status
+            .set_label(&format!("{side} to play. Write the whole line."));
+        self.lesson.set_label("");
+        self.timer.set_label("");
+        self.line_entry.set_text("");
+        self.calc_row().set_visible(true);
+        self.line_entry.grab_focus();
+
+        *self.calculating.borrow_mut() = Some((puzzle, position, Instant::now()));
+        self.describe_mode();
+    }
+
+    fn calc_row(&self) -> gtk4::Widget {
+        self.line_entry
+            .parent()
+            .expect("the entry lives in a row")
+    }
+
+    /// Read the written line, say where it broke, then play the real one out.
+    fn commit_line(self: &Rc<Self>) {
+        let Some((puzzle, position, began)) = self.calculating.borrow_mut().take() else {
+            return;
+        };
+        let written = self.line_entry.text().to_string();
+        // The line from here: the puzzle's own moves after the opponent's
+        // opening move, which `Attempt::new` has already played.
+        let solution: Vec<String> = puzzle.moves.iter().skip(1).cloned().collect();
+        let verdict = omachess_core::calculate::check(&position, &solution, &written);
+
+        if let Err(e) = self.store.borrow().record_calculation(
+            &puzzle.id,
+            chrono::Utc::now(),
+            verdict.depth as u32,
+            verdict.total as u32,
+            verdict.complete,
+            began.elapsed(),
+        ) {
+            omachess_core::diagnostics::record_error("trainer::record_calculation", e);
+        }
+
+        self.status.set_label(&verdict.describe());
+        // Now the board is allowed to move, so the picture in his head can be
+        // held against the one on the table.
+        let played = omachess_core::game::line_to_san(&position, &solution);
+        self.lesson.set_label(&played.join("  "));
+        self.calc_row().set_visible(false);
+        self.replay(&position, &solution);
+        self.describe_mode();
+    }
+
+    /// Walk the true line onto the board, a move at a time.
+    fn replay(self: &Rc<Self>, from: &Chess, line: &[String]) {
+        let mut position = from.clone();
+        let mut frames = Vec::new();
+        for uci in line {
+            let Ok(parsed) = uci.parse::<shakmaty::uci::UciMove>() else {
+                break;
+            };
+            let Ok(mv) = parsed.to_move(&position) else {
+                break;
+            };
+            position.play_unchecked(mv);
+            frames.push((position.clone(), mv.from().map(|f| (f, mv.to()))));
+        }
+        for (step, (position, last)) in frames.into_iter().enumerate() {
+            let weak: Weak<Self> = Rc::downgrade(self);
+            glib::timeout_add_local_once(
+                std::time::Duration::from_millis(600 * (step as u64 + 1)),
+                move || {
+                    if let Some(trainer) = weak.upgrade() {
+                        trainer.board.set_position(&position);
+                        trainer.board.set_last_move(last);
+                        trainer.board.set_check(check_square(&position));
+                        trainer.board.set_mate(mate_square(&position));
+                    }
+                },
+            );
+        }
+    }
+
     /// Switch what the tab is doing.
     fn set_mode(&self, mode: &str) {
         if let Err(e) = self.store.borrow().set_train_mode(mode) {
@@ -550,10 +742,20 @@ impl Trainer {
         }
         self.describe_mode();
         if mode == "vision" {
+            *self.calculating.borrow_mut() = None;
+            self.calc_row().set_visible(false);
             self.next_vision();
-        } else {
+        } else if mode == "calculate" {
             *self.vision.borrow_mut() = None;
             self.vision_row().set_visible(false);
+            self.board.set_marks(&[]);
+            self.start.set_visible(false);
+            self.next_calculation();
+        } else {
+            *self.vision.borrow_mut() = None;
+            *self.calculating.borrow_mut() = None;
+            self.vision_row().set_visible(false);
+            self.calc_row().set_visible(false);
             self.board.set_marks(&[]);
             self.load_next();
         }
@@ -772,6 +974,19 @@ impl Trainer {
             });
             return;
         }
+        if mode == "calculate" {
+            let (lines, mean) = self
+                .store
+                .borrow()
+                .calculation_record()
+                .unwrap_or((0, 0.0));
+            self.mode_caption.set_label(&if lines == 0 {
+                "Write the line before the board moves.".to_owned()
+            } else {
+                format!("{lines} lines — {mean:.1} plies deep on average.")
+            });
+            return;
+        }
         let solved = self.solved_count();
         self.mode_caption.set_label(&if mode == "repeat" {
             format!(
@@ -945,6 +1160,10 @@ impl Trainer {
             self.choose_square(square);
             return;
         }
+        // Nothing to add for calculate mode: no puzzle is loaded there, so
+        // `solving()` below already refuses every click. A guard here was
+        // written and removed — no mutation could make it fire, which makes it
+        // decoration that reads as a rule.
         if !self.solving() {
             return;
         }

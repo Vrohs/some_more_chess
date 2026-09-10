@@ -1298,7 +1298,7 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
     // A mode that exists in the code and not on the screen is not a mode.
     // Board vision was built, committed, and reported as done while nothing
     // was running to show it.
-    checks.push(check("the Train tab offers all three ways to train", || {
+    checks.push(check("the Train tab offers every way to train", || {
         let store = Rc::new(RefCell::new(seeded_store()?));
         let trainer = Trainer::new(store, pieces.clone(), None);
         expect(
@@ -1306,14 +1306,15 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
             "the mode control is not on screen",
         )?;
         let offered = trainer.modes_offered();
-        expect(
-            offered.len() == 3,
-            &format!("the mode control offers {offered:?}"),
-        )?;
-        expect(
-            offered.iter().any(|m| m.contains("vision")),
-            &format!("board vision is not one of the choices: {offered:?}"),
-        )
+        // Named rather than counted, so adding a mode does not break this and
+        // dropping one does.
+        for wanted in ["Learn", "Repeat", "vision", "Calculate"] {
+            expect(
+                offered.iter().any(|m| m.contains(wanted)),
+                &format!("{wanted} is not one of the choices: {offered:?}"),
+            )?;
+        }
+        Ok(())
     }));
 
     // "It's easy and doesn't feel like learning." It started at "is f6 light
@@ -1350,6 +1351,124 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         expect(
             after != opening,
             &format!("five wrong answers left it on {after:?}, which is a wall"),
+        )
+    }));
+
+    // --- calculate: the line before the board moves ------------------------
+    //
+    // The puzzle trainer answers one move at a time, immediately, which lets a
+    // puzzle be finished without ever being calculated. Here the board is
+    // frozen and the whole line is written out first.
+    checks.push(check("a written line is graded and the board is frozen", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
+        trainer.choose_mode("calculate");
+        expect(
+            trainer.calculating(),
+            "calculate mode put up no position to calculate",
+        )?;
+
+        // Touching the board must do nothing at all: reaching for a piece to
+        // see what happens is the habit this mode exists to break. Asserted as
+        // "nothing was graded", which is the part that can actually go wrong —
+        // asserting the drill still exists passed even with the freeze removed.
+        trainer.board().click(Square::B1);
+        trainer.board().click(Square::B8);
+        expect(
+            trainer.calculating(),
+            "the board moved while a line was being written",
+        )?;
+        expect(
+            store
+                .borrow()
+                .calculation_record()
+                .map_err(|e| e.to_string())?
+                .0
+                == 0,
+            "clicking the board graded something before a line was committed",
+        )?;
+
+        let answer = trainer.calculation_answer();
+        expect(!answer.is_empty(), "the position has no line to write")?;
+
+        trainer.write_line(&answer.join(" "));
+        trainer.press_commit();
+
+        let (lines, mean) = store
+            .borrow()
+            .calculation_record()
+            .map_err(|e| e.to_string())?;
+        expect(
+            lines == 1,
+            &format!("committing a line recorded {lines} of them"),
+        )?;
+        expect(
+            mean >= answer.len() as f64,
+            &format!(
+                "the whole line was written and only {mean} plies were credited \
+                 of {}",
+                answer.len()
+            ),
+        )
+    }));
+
+    checks.push(check("a wrong line is credited only as far as it was right", || {
+        // A two-move puzzle: a mate in one has no second ply to break at, and
+        // the first version of this used one and so tested nothing.
+        let store = Rc::new(RefCell::new(two_move_store()?));
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
+        trainer.choose_mode("calculate");
+        let answer = trainer.calculation_answer();
+        expect(!answer.is_empty(), "the position has no line to write")?;
+
+        // Two right, then a legal move that is not the line. Legal matters:
+        // notation that will not parse is refused before the comparison is
+        // reached, so a nonsense token tests the parser and not the grading.
+        expect(
+            answer.len() >= 3,
+            &format!("this check needs a line of three plies, got {answer:?}"),
+        )?;
+        trainer.write_line(&format!("{} {} Rb2", answer[0], answer[1]));
+        trainer.press_commit();
+
+        let (_, mean) = store
+            .borrow()
+            .calculation_record()
+            .map_err(|e| e.to_string())?;
+        expect(
+            (mean - 2.0).abs() < f64::EPSILON,
+            &format!("two right plies then a wrong legal move was credited {mean}"),
+        )?;
+        // The number alone is weak — a miscount can land on it by accident —
+        // so the report has to name the ply and quote what was written.
+        let said = trainer.status_text();
+        expect(
+            said.contains("Ply 3") && said.contains("Rb2"),
+            &format!("the report did not say where it broke: {said:?}"),
+        )
+    }));
+
+    // Same rule as everywhere else: three minutes spent calculating is not a
+    // three-minute solve, and `attempts` feeds every speed figure there is.
+    checks.push(check("calculating never touches the puzzle record", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let before = store.borrow().solved_count().map_err(|e| e.to_string())?;
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
+        trainer.choose_mode("calculate");
+        let answer = trainer.calculation_answer();
+        trainer.write_line(&answer.join(" "));
+        trainer.press_commit();
+
+        let (lines, _) = store
+            .borrow()
+            .calculation_record()
+            .map_err(|e| e.to_string())?;
+        expect(lines > 0, "nothing was recorded, so nothing was tested")?;
+        let after = store.borrow().solved_count().map_err(|e| e.to_string())?;
+        expect(
+            after == before,
+            "calculating wrote a puzzle solve; those figures are the transfer \
+             measure and must not contain written lines",
         )
     }));
 

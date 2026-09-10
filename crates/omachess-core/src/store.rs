@@ -139,6 +139,21 @@ CREATE TABLE IF NOT EXISTS vision_attempts (
 );
 CREATE INDEX IF NOT EXISTS vision_attempts_rung ON vision_attempts (rung, asked_at);
 
+-- Lines written out before the board was allowed to move. Kept apart from
+-- `attempts` for the same reason as everything else here: three minutes spent
+-- calculating is not a three-minute solve, and letting it into that table
+-- would wreck the transfer measure.
+CREATE TABLE IF NOT EXISTS calculations (
+    id        INTEGER PRIMARY KEY,
+    puzzle_id TEXT NOT NULL,
+    at        TEXT NOT NULL,
+    depth     INTEGER NOT NULL,
+    total     INTEGER NOT NULL,
+    complete  INTEGER NOT NULL,
+    millis    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS calculations_at ON calculations (at);
+
 CREATE TABLE IF NOT EXISTS move_log (
     id         INTEGER PRIMARY KEY,
     session_id INTEGER,
@@ -1129,6 +1144,49 @@ impl Store {
         Ok(())
     }
 
+    /// Record one line written out before the board moved.
+    pub fn record_calculation(
+        &self,
+        puzzle_id: &str,
+        at: DateTime<Utc>,
+        depth: u32,
+        total: u32,
+        complete: bool,
+        took: std::time::Duration,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO calculations (puzzle_id, at, depth, total, complete, millis)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                puzzle_id,
+                at,
+                depth,
+                total,
+                complete as i64,
+                took.as_millis() as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Lines written, and the mean depth reached. The figure being trained.
+    pub fn calculation_record(&self) -> Result<(u32, f64)> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(AVG(depth), 0.0) FROM calculations",
+            [],
+            |r| Ok((r.get::<_, i64>(0)? as u32, r.get::<_, f64>(1)?)),
+        )?)
+    }
+
+    /// Depth reached per line, oldest first, for the trend.
+    pub fn calculation_depths(&self) -> Result<Vec<f64>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT depth FROM calculations ORDER BY at ASC")?;
+        let rows = stmt.query_map([], |r| Ok(r.get::<_, i64>(0)? as f64))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Record one board-vision answer.
     pub fn record_vision(
         &self,
@@ -1572,6 +1630,32 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn export_calculations(&self) -> Result<Vec<crate::backup::CalculationRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT puzzle_id, at, depth, total, complete, millis
+             FROM calculations ORDER BY at ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::backup::CalculationRow {
+                puzzle_id: r.get(0)?,
+                at: r.get(1)?,
+                depth: r.get::<_, i64>(2)? as u32,
+                total: r.get::<_, i64>(3)? as u32,
+                complete: r.get::<_, i64>(4)? != 0,
+                millis: r.get::<_, i64>(5)? as u32,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn has_calculation(&self, at: DateTime<Utc>) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM calculations WHERE at = ?1)",
+            params![at],
+            |r| r.get::<_, i64>(0),
+        )? != 0)
     }
 
     pub fn export_vision(&self) -> Result<Vec<crate::backup::VisionRow>> {

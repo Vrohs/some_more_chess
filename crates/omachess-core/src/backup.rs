@@ -41,6 +41,9 @@ pub struct Backup {
     /// Board-vision answers, absent in backups written before the ladder.
     #[serde(default)]
     pub vision: Vec<VisionRow>,
+    /// Lines written out, absent in backups written before calculate mode.
+    #[serde(default)]
+    pub calculations: Vec<CalculationRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -65,6 +68,16 @@ pub struct DrillRow {
     /// The engine's line, absent in backups written before it was kept.
     #[serde(default)]
     pub best_line: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CalculationRow {
+    pub puzzle_id: String,
+    pub at: DateTime<Utc>,
+    pub depth: u32,
+    pub total: u32,
+    pub complete: bool,
+    pub millis: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -216,6 +229,7 @@ pub fn export(store: &Store) -> Result<String> {
         drill_attempts: store.export_drill_attempts()?,
         drill_answers: store.export_drill_answers()?,
         vision: store.export_vision()?,
+        calculations: store.export_calculations()?,
     };
     serde_json::to_string_pretty(&backup).context("serialising the backup")
 }
@@ -291,6 +305,22 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
                 // game it came from is somewhere else, or nowhere.
                 game_id: None,
             },
+        )?;
+        report.drills_written += 1;
+    }
+
+    for row in &backup.calculations {
+        if store.has_calculation(row.at)? {
+            report.drills_skipped += 1;
+            continue;
+        }
+        store.record_calculation(
+            &row.puzzle_id,
+            row.at,
+            row.depth,
+            row.total,
+            row.complete,
+            std::time::Duration::from_millis(u64::from(row.millis)),
         )?;
         report.drills_written += 1;
     }
@@ -569,6 +599,7 @@ mod tests {
             "drill_attempts",
             "drill_answers",
             "vision_attempts",
+            "calculations",
         ];
 
         let mut tables: Vec<&str> = crate::store::SCHEMA
