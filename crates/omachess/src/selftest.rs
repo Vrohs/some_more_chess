@@ -56,7 +56,7 @@ fn check(name: &'static str, body: impl FnOnce() -> Result<(), String>) -> Check
     }
     Check {
         name,
-        outcome: body(),
+        outcome: caught(body),
         skipped: false,
     }
 }
@@ -71,6 +71,31 @@ fn allocate(widget: &impl gtk4::prelude::IsA<gtk4::Widget>, side: i32) {
     let widget = widget.as_ref();
     widget.set_size_request(side, side);
     widget.allocate(side, side, -1, None);
+}
+
+/// Run a check body, turning a panic into a failed check rather than an abort.
+///
+/// The whole suite runs inside GTK's `activate` handler, and a panic that
+/// reaches that frame unwinds into C, where Rust may not unwind: the process
+/// aborts and dumps core before a word of the report is printed. A single
+/// `unwrap` on a `None` used to take the entire run with it and say nothing
+/// about which check was holding the knife.
+///
+/// The body holds widgets and stores a panic may leave half-built, so this is
+/// `AssertUnwindSafe`. That is honest here: every check builds its own store
+/// and its own views, and a run that panicked is being read for the panic
+/// rather than trusted afterwards.
+fn caught(body: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).unwrap_or_else(|payload| {
+        // The panic hook has already put the file and line on stderr; what the
+        // report needs is the reason, beside the name of the check.
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panic with no message".to_owned());
+        Err(format!("panicked: {message}"))
+    })
 }
 
 fn expect(condition: bool, complaint: &str) -> Result<(), String> {
@@ -1201,6 +1226,71 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
             &format!(
                 "a game that does not lead to this position was offered as its \
                  context: pivot {pivot}, {len} moves"
+            ),
+        )
+    }));
+
+    // Asking to practise a position must land on that position. It selected
+    // the right one and then the tab switch rebuilt the list, which jumped
+    // back to the worst mistake on record — so pressing the button sent you to
+    // some other game entirely.
+    checks.push(check("the drill opens on the position that was asked for", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let mut ids = Vec::new();
+        // Three positions, worst first in the queue. The one to open is the
+        // least costly, so landing on the top of the list is unmistakable.
+        for (n, lost) in [("worst", 0.9_f64), ("middling", 0.5), ("wanted", 0.1)] {
+            let puzzle = omachess_core::puzzle::Puzzle {
+                id: n.to_owned(),
+                fen: "6k1/5ppp/8/8/8/8/5PPP/1R4K1 b - - 0 1".to_owned(),
+                moves: vec!["g8h8".to_owned(), "b1b8".to_owned()],
+                rating: 1200,
+                rating_deviation: 0,
+                popularity: 0,
+                nb_plays: 0,
+                themes: vec!["middlegame".to_owned()],
+                game_url: String::new(),
+                opening_tags: Vec::new(),
+            };
+            store
+                .borrow_mut()
+                .insert_puzzles(std::slice::from_ref(&puzzle))
+                .map_err(|e| e.to_string())?;
+            store
+                .borrow()
+                .record_drill_origin(
+                    n,
+                    &DrillOrigin {
+                        source: String::new(),
+                        played_at: chrono::Utc::now(),
+                        ply: 40,
+                        played: "Kh8".to_owned(),
+                        best: "Rb8".to_owned(),
+                        lost,
+                        phase: "middlegame".to_owned(),
+                        win_before: 0.8,
+                        best_line: Vec::new(),
+                        game_id: None,
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            ids.push(n);
+        }
+
+        let drills = DrillView::new(store, pieces.clone(), None);
+        drills.focus("wanted");
+        expect(
+            drills.showing().as_deref() == Some("wanted"),
+            &format!("focus opened {:?}, not the position asked for", drills.showing()),
+        )?;
+
+        // And a rebuild — which is what showing the tab does — keeps it.
+        drills.reload();
+        expect(
+            drills.showing().as_deref() == Some("wanted"),
+            &format!(
+                "rebuilding the list threw the choice away and opened {:?}",
+                drills.showing()
             ),
         )
     }));

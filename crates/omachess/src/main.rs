@@ -824,9 +824,16 @@ fn command_selftest(filter: Option<String>) -> anyhow::Result<()> {
     let passed = std::rc::Rc::new(std::cell::Cell::new(false));
     let result = passed.clone();
     app.connect_activate(move |app| {
-        style::install();
-        let pieces = pieces::PieceSet::discover(&paths::pieces_dir()).map(std::rc::Rc::new);
-        result.set(selftest::run(pieces, filter.as_deref()));
+        // Called from C, which Rust may not unwind through. Each check guards
+        // itself and reports by name; this catches the scaffolding around them,
+        // so a self-test can always finish its sentence instead of aborting
+        // mid-word and leaving a core dump as the only account of what broke.
+        let held = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            style::install();
+            let pieces = pieces::PieceSet::discover(&paths::pieces_dir()).map(std::rc::Rc::new);
+            selftest::run(pieces, filter.as_deref())
+        }));
+        result.set(held.unwrap_or(false));
         app.quit();
     });
     app.run_with_args::<&str>(&[]);
@@ -988,8 +995,10 @@ fn build_window(app: &adw::Application, study_file: Option<PathBuf>) -> anyhow::
         let stack = stack.clone();
         let drills = drills.clone();
         play.connect_practise(move |puzzle_id| {
-            drills.focus(puzzle_id);
+            // Switch first: showing the tab rebuilds its list, and doing that
+            // after choosing the position would discard the choice.
             stack.set_visible_child_name("drill");
+            drills.focus(puzzle_id);
         });
     }
 

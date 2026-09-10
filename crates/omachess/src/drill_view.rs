@@ -371,6 +371,14 @@ impl DrillView {
         }
     }
 
+    /// The position currently open, by puzzle id.
+    pub(crate) fn showing(&self) -> Option<String> {
+        self.positions
+            .borrow()
+            .get(self.current.get())
+            .map(|(id, _, _)| id.clone())
+    }
+
     pub(crate) fn status_text(&self) -> String {
         self.status.text().to_string()
     }
@@ -427,6 +435,16 @@ impl DrillView {
     /// Called when the view is shown, because importing a game or losing a new
     /// one changes what is worth working on.
     pub fn reload(&self) {
+        // Whatever is open stays open. The tab is rebuilt every time it is
+        // shown, and rebuilding used to jump back to the top of the list — so
+        // asking to practise a position from the Play tab selected it and then
+        // the tab switch immediately replaced it with the worst mistake on
+        // record, which reads as being sent somewhere at random.
+        let showing = self
+            .positions
+            .borrow()
+            .get(self.current.get())
+            .map(|(id, _, _)| id.clone());
         let found = {
             let store = self.store.borrow();
             store.drills_to_play(40).unwrap_or_default()
@@ -466,8 +484,16 @@ impl DrillView {
             self.board.set_orientation(Color::White);
             self.board.set_position(&shakmaty::Chess::default());
         } else {
-            self.picker.set_selected(0);
-            self.describe(0);
+            let index = showing
+                .and_then(|id| {
+                    self.positions
+                        .borrow()
+                        .iter()
+                        .position(|(queued, _, _)| *queued == id)
+                })
+                .unwrap_or(0);
+            self.picker.set_selected(index as u32);
+            self.describe(index);
         }
     }
 
