@@ -463,6 +463,28 @@ impl Trainer {
         self.lesson_asks.get()
     }
 
+    /// What the mode control offers, and whether it is on screen. Code that
+    /// works and a widget nobody can reach are the same thing to the person
+    /// looking at the window.
+    pub(crate) fn modes_offered(&self) -> Vec<String> {
+        let model = self.mode_pick.model();
+        let mut out = Vec::new();
+        if let Some(model) = model {
+            for index in 0..model.n_items() {
+                if let Some(item) = model.item(index) {
+                    if let Some(text) = item.downcast_ref::<gtk4::StringObject>() {
+                        out.push(text.string().to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub(crate) fn mode_control_visible(&self) -> bool {
+        self.mode_pick.is_visible() && self.mode_pick.parent().is_some()
+    }
+
     /// Test hooks for the vision ladder.
     pub(crate) fn vision_prompt(&self) -> String {
         self.vision

@@ -1295,6 +1295,27 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         )
     }));
 
+    // A mode that exists in the code and not on the screen is not a mode.
+    // Board vision was built, committed, and reported as done while nothing
+    // was running to show it.
+    checks.push(check("the Train tab offers all three ways to train", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let trainer = Trainer::new(store, pieces.clone(), None);
+        expect(
+            trainer.mode_control_visible(),
+            "the mode control is not on screen",
+        )?;
+        let offered = trainer.modes_offered();
+        expect(
+            offered.len() == 3,
+            &format!("the mode control offers {offered:?}"),
+        )?;
+        expect(
+            offered.iter().any(|m| m.contains("vision")),
+            &format!("board vision is not one of the choices: {offered:?}"),
+        )
+    }));
+
     // --- the ladder below calculation --------------------------------------
     //
     // He cannot visualise: plays on instinct, reacts, would lose to a serious
