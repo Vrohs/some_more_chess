@@ -6,12 +6,13 @@ use std::time::Instant;
 
 use chrono::{Duration as Span, Utc};
 use gtk4::prelude::*;
-use gtk4::{glib, Align, AspectFrame, Box as GtkBox, Button, Label, Orientation, Switch};
+use gtk4::{glib, Align, AspectFrame, Box as GtkBox, Button, Label, Orientation};
 use omachess_core::grade::band;
 
 use omachess_core::puzzle::{Attempt, MoveOutcome, Puzzle};
 use omachess_core::session::{Session, Solve};
 use omachess_core::store::Store;
+use omachess_core::vision::{Answer, Rung, NEEDED};
 use shakmaty::san::San;
 use shakmaty::{Move, Position, Square};
 
@@ -24,6 +25,67 @@ use crate::progress_view::ProgressData;
 /// be, because this one is being explained rather than played, and the solver
 /// is no longer on a clock that counts.
 const LESSON_DEPTH: u32 = 18;
+
+/// The three ways the tab works, in the order the picker lists them.
+const MODES: [&str; 3] = ["Learn", "Repeat & measure", "Board vision"];
+
+fn mode_key(index: u32) -> &'static str {
+    match index {
+        1 => "repeat",
+        2 => "vision",
+        _ => "learn",
+    }
+}
+
+fn rung_number(rung: Rung) -> usize {
+    Rung::LADDER.iter().position(|r| *r == rung).unwrap_or(0) + 1
+}
+
+fn mode_index(key: &str) -> u32 {
+    match key {
+        "repeat" => 1,
+        "vision" => 2,
+        _ => 0,
+    }
+}
+
+/// Which answer button was pressed. The pair means light/dark on one rung and
+/// yes/no on another, so they are named by side rather than by meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VisionSide {
+    A,
+    B,
+}
+
+/// What the answer was, for the line under the board.
+fn describe_answer(drill: &omachess_core::vision::Drill) -> String {
+    match &drill.answer {
+        Answer::Light => "It is light.".to_owned(),
+        Answer::Dark => "It is dark.".to_owned(),
+        Answer::Yes => "Yes — it attacks it.".to_owned(),
+        Answer::No => "No — it does not.".to_owned(),
+        Answer::Squares(set) => {
+            let mut named: Vec<String> = set.iter().map(|s| s.to_string()).collect();
+            named.sort();
+            named.join(" ")
+        }
+    }
+}
+
+fn expected_squares(drill: &omachess_core::vision::Drill) -> Vec<Square> {
+    match &drill.answer {
+        Answer::Squares(set) => set.iter().copied().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A board-vision question in progress.
+struct VisionDrill {
+    drill: omachess_core::vision::Drill,
+    asked: Instant,
+    /// Squares clicked so far, for the rungs answered by clicking.
+    chosen: Vec<Square>,
+}
 
 /// How long a rejected move stays highlighted.
 /// Wrong moves before the answer is shown. The attempt already counts as failed
@@ -54,7 +116,12 @@ pub struct Trainer {
     store: Rc<RefCell<Store>>,
     session: Session,
     board: Rc<BoardView>,
-    mode_switch: Switch,
+    mode_pick: gtk4::DropDown,
+    vision_a: Button,
+    vision_b: Button,
+    vision_done: Button,
+    /// The drill on screen, when the tab is doing board vision.
+    vision: RefCell<Option<VisionDrill>>,
     /// What the solver actually played here, once it can be shown.
     origin: Label,
     mode_caption: Label,
@@ -117,8 +184,24 @@ impl Trainer {
 
         // The two modes are a deliberate, visible choice rather than something
         // the app decides quietly: one builds a repertoire, the other measures.
-        let mode_switch = Switch::builder().valign(Align::Center).build();
-        let mode_label = Label::builder().label("Repeat & measure").build();
+        // Three ways to train, not two. A switch cannot say three things.
+        let mode_pick = gtk4::DropDown::from_strings(&MODES);
+        mode_pick.set_valign(Align::Center);
+
+        // Board vision: the answer buttons for the rungs that are a yes/no or
+        // a light/dark, and the Next that follows a graded answer.
+        let vision_a = Button::with_label("Light");
+        let vision_b = Button::with_label("Dark");
+        let vision_done = Button::with_label("Check");
+        vision_done.add_css_class("suggested-action");
+        let vision_row = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(6)
+            .build();
+        vision_row.append(&vision_a);
+        vision_row.append(&vision_b);
+        vision_row.append(&vision_done);
+        vision_row.set_visible(false);
 
         // Filled in when a drill position is finished: which game it came from
         // and what was played instead. Blank for an ordinary puzzle.
@@ -155,8 +238,7 @@ impl Trainer {
             .spacing(8)
             .build();
         mode_row.append(&start);
-        mode_row.append(&mode_label);
-        mode_row.append(&mode_switch);
+        mode_row.append(&mode_pick);
         let spacer = GtkBox::builder().hexpand(true).build();
         mode_row.append(&spacer);
         mode_row.append(&timer);
@@ -167,6 +249,7 @@ impl Trainer {
             .build();
         header.append(&mode_row);
         header.append(&status);
+        header.append(&vision_row);
         header.append(&mode_caption);
         header.append(&origin);
         header.append(&lesson);
@@ -220,7 +303,11 @@ impl Trainer {
             store,
             session: Session::new(),
             board,
-            mode_switch,
+            mode_pick,
+            vision_a,
+            vision_b,
+            vision_done,
+            vision: RefCell::new(None),
             origin,
             mode_caption,
             start,
@@ -260,16 +347,34 @@ impl Trainer {
             });
         }
 
-        trainer.mode_switch.set_active(trainer.repeat_mode());
+        trainer
+            .mode_pick
+            .set_selected(mode_index(&trainer.store.borrow().train_mode().unwrap_or_default()));
         trainer.describe_mode();
 
         let weak: Weak<Self> = Rc::downgrade(&trainer);
-        trainer.mode_switch.connect_state_set(move |_, on| {
+        trainer.mode_pick.connect_selected_notify(move |pick| {
             if let Some(trainer) = weak.upgrade() {
-                trainer.set_repeat_mode(on);
-                trainer.describe_mode();
+                trainer.set_mode(mode_key(pick.selected()));
             }
-            glib::Propagation::Proceed
+        });
+
+        for (button, answer) in [
+            (&trainer.vision_a, VisionSide::A),
+            (&trainer.vision_b, VisionSide::B),
+        ] {
+            let weak: Weak<Self> = Rc::downgrade(&trainer);
+            button.connect_clicked(move |_| {
+                if let Some(trainer) = weak.upgrade() {
+                    trainer.answer_vision_button(answer);
+                }
+            });
+        }
+        let weak: Weak<Self> = Rc::downgrade(&trainer);
+        trainer.vision_done.connect_clicked(move |_| {
+            if let Some(trainer) = weak.upgrade() {
+                trainer.commit_vision();
+            }
         });
 
         let weak: Weak<Self> = Rc::downgrade(&trainer);
@@ -358,6 +463,48 @@ impl Trainer {
         self.lesson_asks.get()
     }
 
+    /// Test hooks for the vision ladder.
+    pub(crate) fn vision_prompt(&self) -> String {
+        self.vision
+            .borrow()
+            .as_ref()
+            .map(|v| v.drill.prompt.clone())
+            .unwrap_or_default()
+    }
+
+    /// The squares that would answer the drill on screen correctly.
+    pub(crate) fn vision_answer(&self) -> Vec<Square> {
+        self.vision
+            .borrow()
+            .as_ref()
+            .map(|v| expected_squares(&v.drill))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn vision_side_for(&self, want_correct: bool) -> Option<VisionSide> {
+        let held = self.vision.borrow();
+        let drill = &held.as_ref()?.drill;
+        let a_is_right = matches!(drill.answer, Answer::Light | Answer::Yes);
+        Some(if a_is_right == want_correct {
+            VisionSide::A
+        } else {
+            VisionSide::B
+        })
+    }
+
+    pub(crate) fn press_vision(self: &Rc<Self>, side: VisionSide) {
+        self.answer_vision_button(side);
+    }
+
+    pub(crate) fn press_vision_check(self: &Rc<Self>) {
+        self.commit_vision();
+    }
+
+    pub(crate) fn choose_mode(&self, mode: &str) {
+        self.mode_pick.set_selected(mode_index(mode));
+        self.set_mode(mode);
+    }
+
     pub(crate) fn status_text(&self) -> String {
         self.status.text().to_string()
     }
@@ -372,18 +519,200 @@ impl Trainer {
 
     /// Draw only from positions taken out of the player's own games.
     /// Switch between learning new material and re-testing solved material.
-    pub fn set_repeat_mode(&self, on: bool) {
-        if let Err(e) = self.store.borrow().set_repeat_mode(on) {
-            omachess_core::diagnostics::record_error("trainer::set_repeat_mode", e);
+     /// Say plainly which mode is on and what it does, so the distinction is
+    /// never a hidden detail.
+    /// Switch what the tab is doing.
+    fn set_mode(&self, mode: &str) {
+        if let Err(e) = self.store.borrow().set_train_mode(mode) {
+            omachess_core::diagnostics::record_error("trainer::set_mode", e);
         }
-        self.load_next();
+        self.describe_mode();
+        if mode == "vision" {
+            self.next_vision();
+        } else {
+            *self.vision.borrow_mut() = None;
+            self.vision_row().set_visible(false);
+            self.board.set_marks(&[]);
+            self.load_next();
+        }
     }
 
-    /// Say plainly which mode is on and what it does, so the distinction is
-    /// never a hidden detail.
+    fn vision_row(&self) -> gtk4::Widget {
+        self.vision_a
+            .parent()
+            .expect("the answer buttons live in a row")
+    }
+
+    fn rung(&self) -> Rung {
+        self.store
+            .borrow()
+            .vision_rung()
+            .ok()
+            .and_then(|key| Rung::from_key(&key))
+            .unwrap_or(Rung::SquareColour)
+    }
+
+    /// Deal the next board-vision question.
+    fn next_vision(&self) {
+        let rung = self.rung();
+        let seed = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
+        let drill = omachess_core::vision::next(rung, seed);
+
+        self.board.set_orientation(shakmaty::Color::White);
+        self.board.set_board(&drill.board);
+        self.board.set_marks(&[]);
+        self.board.select(None);
+        self.board.set_last_move(None);
+        self.board.set_check(None);
+        self.board.set_mate(None);
+
+        self.status.set_label(&drill.prompt);
+        self.lesson.set_label("");
+        self.timer.set_label("");
+        self.start.set_visible(false);
+
+        // Two buttons for a two-way answer, the board for everything else.
+        let two_way = matches!(
+            drill.answer,
+            Answer::Light | Answer::Dark | Answer::Yes | Answer::No
+        );
+        let (a, b) = match drill.rung {
+            Rung::SquareColour => ("Light", "Dark"),
+            _ => ("Yes", "No"),
+        };
+        self.vision_a.set_label(a);
+        self.vision_b.set_label(b);
+        self.vision_a.set_visible(two_way);
+        self.vision_b.set_visible(two_way);
+        self.vision_done.set_visible(!two_way);
+        self.vision_row().set_visible(true);
+
+        *self.vision.borrow_mut() = Some(VisionDrill {
+            drill,
+            asked: Instant::now(),
+            chosen: Vec::new(),
+        });
+        self.describe_mode();
+    }
+
+    fn answer_vision_button(self: &Rc<Self>, side: VisionSide) {
+        let given = {
+            let held = self.vision.borrow();
+            let Some(current) = held.as_ref() else {
+                return;
+            };
+            match (current.drill.rung, side) {
+                (Rung::SquareColour, VisionSide::A) => Answer::Light,
+                (Rung::SquareColour, VisionSide::B) => Answer::Dark,
+                (_, VisionSide::A) => Answer::Yes,
+                (_, VisionSide::B) => Answer::No,
+            }
+        };
+        self.grade_vision(&given);
+    }
+
+    /// The clicked squares, offered as the answer.
+    fn commit_vision(self: &Rc<Self>) {
+        let given = {
+            let held = self.vision.borrow();
+            let Some(current) = held.as_ref() else {
+                return;
+            };
+            Answer::Squares(current.chosen.iter().copied().collect())
+        };
+        self.grade_vision(&given);
+    }
+
+    /// A click during board vision picks a square rather than moving a piece.
+    fn choose_square(&self, square: Square) {
+        let marks = {
+            let mut held = self.vision.borrow_mut();
+            let Some(current) = held.as_mut() else {
+                return;
+            };
+            if let Some(at) = current.chosen.iter().position(|s| *s == square) {
+                current.chosen.remove(at);
+            } else {
+                current.chosen.push(square);
+            }
+            current.chosen.clone()
+        };
+        self.board.set_marks(&marks);
+    }
+
+    fn grade_vision(self: &Rc<Self>, given: &Answer) {
+        let Some(current) = self.vision.borrow_mut().take() else {
+            return;
+        };
+        let took = current.asked.elapsed();
+        let right = omachess_core::vision::judge(&current.drill, given);
+
+        // Recorded on its own, never in `attempts`: that table is one row per
+        // puzzle and feeds every speed figure in the application. A drill
+        // answered in two seconds is not a puzzle solved in two seconds.
+        let rung = current.drill.rung;
+        {
+            let store = self.store.borrow();
+            if let Err(e) = store.record_vision(rung.key(), chrono::Utc::now(), right, took) {
+                omachess_core::diagnostics::record_error("trainer::record_vision", e);
+            }
+        }
+
+        if right {
+            self.status.set_label(&format!("Right — {:.1}s", took.as_secs_f64()));
+        } else {
+            self.status.set_label("Not that.");
+            self.board.set_marks(&expected_squares(&current.drill));
+        }
+        self.lesson.set_label(&describe_answer(&current.drill));
+
+        // Climb when the rung has been climbed, rather than after a count.
+        let recent = self
+            .store
+            .borrow()
+            .vision_recent(rung.key(), NEEDED as u32)
+            .unwrap_or_default();
+        if omachess_core::vision::ready_to_promote(&recent, rung) {
+            if let Some(up) = rung.next() {
+                if let Err(e) = self.store.borrow().set_vision_rung(up.key()) {
+                    omachess_core::diagnostics::record_error("trainer::promote", e);
+                }
+                self.lesson
+                    .set_label(&format!("{} — next: {}", describe_answer(&current.drill), up.label()));
+            }
+        }
+
+        let weak: Weak<Self> = Rc::downgrade(self);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(if right { 500 } else { 2200 }), move || {
+            if let Some(trainer) = weak.upgrade() {
+                if trainer.store.borrow().train_mode().unwrap_or_default() == "vision" {
+                    trainer.next_vision();
+                }
+            }
+        });
+    }
+
     fn describe_mode(&self) {
+        let mode = self.store.borrow().train_mode().unwrap_or_default();
+        if mode == "vision" {
+            let rung = self.rung();
+            let (asked, right) = self
+                .store
+                .borrow()
+                .vision_record(rung.key())
+                .unwrap_or((0, 0));
+            self.mode_caption.set_label(&if asked == 0 {
+                format!("{} — {} of 6.", rung.label(), rung_number(rung))
+            } else {
+                format!(
+                    "{} — {right} of {asked} right.",
+                    rung.label()
+                )
+            });
+            return;
+        }
         let solved = self.solved_count();
-        self.mode_caption.set_label(&if self.repeat_mode() {
+        self.mode_caption.set_label(&if mode == "repeat" {
             format!(
                 "Re-testing {solved} solved puzzle{} — these attempts are measured.",
                 if solved == 1 { "" } else { "s" }
@@ -549,6 +878,12 @@ impl Trainer {
     }
 
     fn on_square(self: &Rc<Self>, square: Square) {
+        // In board vision a click chooses a square rather than moving a piece:
+        // most of the rungs are arrangements no move is legal in.
+        if self.vision.borrow().is_some() {
+            self.choose_square(square);
+            return;
+        }
         if !self.solving() {
             return;
         }

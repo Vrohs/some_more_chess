@@ -93,6 +93,8 @@ pub struct BoardView {
     selected: RefCell<Option<Square>>,
     /// The move just played, highlighted so the reply is easy to see.
     last_move: RefCell<Option<(Square, Square)>>,
+    /// Squares the solver has chosen as an answer.
+    marks: RefCell<Vec<Square>>,
     /// The king square to mark when the side to move is in check.
     check: RefCell<Option<Square>>,
     /// The mated king, if the game ended that way.
@@ -235,6 +237,7 @@ impl BoardView {
             drag_handler: RefCell::new(None),
             selected: RefCell::new(None),
             last_move: RefCell::new(None),
+            marks: RefCell::new(Vec::new()),
             check: RefCell::new(None),
             mate: RefCell::new(None),
             orientation: RefCell::new(Color::White),
@@ -636,7 +639,15 @@ impl BoardView {
 
     /// Draw a position.
     pub fn set_position(&self, position: &Chess) {
-        let board = position.board();
+        self.set_board(position.board());
+    }
+
+    /// Draw any arrangement of pieces, legal or not.
+    ///
+    /// A board-vision drill is a lone knight on d4 — no kings, so not a `Chess`
+    /// position at all and impossible to draw through `set_position`. Every
+    /// rung below the last one is an illegal arrangement of this kind.
+    pub fn set_board(&self, board: &shakmaty::Board) {
         for index in 0..64u32 {
             let square = Square::new(index);
             let piece = board.piece_at(square);
@@ -718,6 +729,26 @@ impl BoardView {
         if let Some(square) = square {
             self.squares[square as usize].cell.add_css_class("selected");
         }
+    }
+
+    /// Mark the squares the solver has chosen.
+    ///
+    /// Distinct from `select`, which is the one square a move is coming from.
+    /// The existing vocabulary — selected, last-move, mated, in-check, cursor —
+    /// has nothing that means "you picked this and it is still your answer".
+    pub fn set_marks(&self, squares: &[Square]) {
+        for previous in self.marks.replace(squares.to_vec()) {
+            self.squares[previous as usize]
+                .cell
+                .remove_css_class("marked");
+        }
+        for square in squares {
+            self.squares[*square as usize].cell.add_css_class("marked");
+        }
+    }
+
+    pub fn marks(&self) -> Vec<Square> {
+        self.marks.borrow().clone()
     }
 
     /// Highlight the move just played.

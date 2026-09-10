@@ -25,6 +25,7 @@ pub mod session;
 pub mod store;
 pub mod study;
 pub mod teach;
+pub mod vision;
 
 pub use grade::{grade, next_rating, Speed};
 pub use puzzle::{Attempt, MoveOutcome, Puzzle};

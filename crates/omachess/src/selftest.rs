@@ -1295,6 +1295,133 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         )
     }));
 
+    // --- the ladder below calculation --------------------------------------
+    //
+    // He cannot visualise: plays on instinct, reacts, would lose to a serious
+    // player every time. The puzzle trainer answers every move immediately,
+    // which trains exactly that. These rungs are answered by clicking, decided
+    // by geometry, and — critically — kept out of the measurements the rest of
+    // the application depends on.
+    checks.push(check("board vision asks a question and takes an answer", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
+        trainer.choose_mode("vision");
+
+        let prompt = trainer.vision_prompt();
+        expect(
+            !prompt.is_empty(),
+            "board vision showed no question at all",
+        )?;
+
+        let side = trainer
+            .vision_side_for(true)
+            .ok_or("no drill was dealt to answer")?;
+        trainer.press_vision(side);
+
+        let (asked, right) = store
+            .borrow()
+            .vision_record("colour")
+            .map_err(|e| e.to_string())?;
+        expect(
+            (asked, right) == (1, 1),
+            &format!("a right answer recorded {right} right of {asked} asked"),
+        )
+    }));
+
+    checks.push(check("a wrong answer in board vision is refused", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
+        trainer.choose_mode("vision");
+        let side = trainer
+            .vision_side_for(false)
+            .ok_or("no drill was dealt to answer")?;
+        trainer.press_vision(side);
+
+        let (asked, right) = store
+            .borrow()
+            .vision_record("colour")
+            .map_err(|e| e.to_string())?;
+        expect(
+            (asked, right) == (1, 0),
+            &format!("a wrong answer recorded {right} right of {asked} asked"),
+        )
+    }));
+
+    // The load-bearing one. `attempts` is one row per puzzle and feeds
+    // `paired_solves` and `transfer_by_band`; a drill answered in two seconds
+    // is not a puzzle solved in two seconds, and letting these in would wreck
+    // the transfer measure the whole application rests on.
+    checks.push(check("board vision never touches the puzzle record", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        let before = store.borrow().solved_count().map_err(|e| e.to_string())?;
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
+        trainer.choose_mode("vision");
+
+        for _ in 0..8 {
+            if let Some(side) = trainer.vision_side_for(true) {
+                trainer.press_vision(side);
+            }
+            // The next drill arrives on a timer, so let the loop turn.
+            pump(2, || false);
+        }
+
+        let (asked, _) = store
+            .borrow()
+            .vision_record("colour")
+            .map_err(|e| e.to_string())?;
+        expect(asked > 0, "no vision answers were recorded, so nothing was tested")?;
+        let after = store.borrow().solved_count().map_err(|e| e.to_string())?;
+        expect(
+            after == before,
+            &format!(
+                "board vision wrote {} puzzle solves; those figures are the \
+                 transfer measure and must not contain drills",
+                after - before
+            ),
+        )
+    }));
+
+    // Four of the six rungs are answered by clicking squares rather than
+    // pressing a button, and the board they are drawn on is usually not a
+    // legal position at all — a lone knight has no kings.
+    checks.push(check("a clicked rung takes the squares you click", || {
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        store
+            .borrow()
+            .set_vision_rung("knight")
+            .map_err(|e| e.to_string())?;
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
+        trainer.choose_mode("vision");
+
+        let wanted = trainer.vision_answer();
+        expect(
+            !wanted.is_empty(),
+            "the knight rung asked for no squares at all",
+        )?;
+
+        for square in &wanted {
+            trainer.board().click(*square);
+        }
+        expect(
+            trainer.board().marks().len() == wanted.len(),
+            &format!(
+                "clicked {} squares and {} were marked",
+                wanted.len(),
+                trainer.board().marks().len()
+            ),
+        )?;
+        trainer.press_vision_check();
+
+        let (asked, right) = store
+            .borrow()
+            .vision_record("knight")
+            .map_err(|e| e.to_string())?;
+        expect(
+            (asked, right) == (1, 1),
+            &format!("clicking every right square scored {right} of {asked}"),
+        )
+    }));
+
     // --- the exercise, which is the point of the tab ----------------------
     //
     // It used to open on "Play it out against the engine. What you played last

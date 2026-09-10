@@ -125,6 +125,20 @@ CREATE TABLE IF NOT EXISTS drill_answers (
 );
 CREATE INDEX IF NOT EXISTS drill_answers_puzzle ON drill_answers (puzzle_id, answered_at);
 
+-- Board vision: the rungs below calculation. Kept well away from `attempts`,
+-- which is one row per puzzle and feeds every speed figure in the application.
+-- A drill answered in two seconds is not a puzzle solved in two seconds, and
+-- letting these into that table would wreck the transfer measure the whole
+-- thing rests on.
+CREATE TABLE IF NOT EXISTS vision_attempts (
+    id       INTEGER PRIMARY KEY,
+    rung     TEXT NOT NULL,
+    asked_at TEXT NOT NULL,
+    correct  INTEGER NOT NULL,
+    millis   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS vision_attempts_rung ON vision_attempts (rung, asked_at);
+
 CREATE TABLE IF NOT EXISTS move_log (
     id         INTEGER PRIMARY KEY,
     session_id INTEGER,
@@ -1115,6 +1129,52 @@ impl Store {
         Ok(())
     }
 
+    /// Record one board-vision answer.
+    pub fn record_vision(
+        &self,
+        rung: &str,
+        at: DateTime<Utc>,
+        correct: bool,
+        took: std::time::Duration,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO vision_attempts (rung, asked_at, correct, millis)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![rung, at, correct as i64, took.as_millis() as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The most recent answers on a rung, oldest first, for the promotion gate.
+    pub fn vision_recent(
+        &self,
+        rung: &str,
+        limit: u32,
+    ) -> Result<Vec<(bool, std::time::Duration)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT correct, millis FROM (
+                 SELECT correct, millis, asked_at FROM vision_attempts
+                 WHERE rung = ?1 ORDER BY asked_at DESC LIMIT ?2
+             ) ORDER BY asked_at ASC",
+        )?;
+        let rows = stmt.query_map(params![rung, limit], |r| {
+            Ok((
+                r.get::<_, i64>(0)? != 0,
+                std::time::Duration::from_millis(r.get::<_, i64>(1)? as u64),
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Answers and correct answers on a rung, all time.
+    pub fn vision_record(&self, rung: &str) -> Result<(u32, u32)> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(correct), 0) FROM vision_attempts WHERE rung = ?1",
+            params![rung],
+            |r| Ok((r.get::<_, i64>(0)? as u32, r.get::<_, i64>(1)? as u32)),
+        )?)
+    }
+
     /// Note whether the move was found, before any attempt to convert it.
     pub fn record_drill_answer(
         &self,
@@ -1514,6 +1574,29 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn export_vision(&self) -> Result<Vec<crate::backup::VisionRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT rung, asked_at, correct, millis FROM vision_attempts ORDER BY asked_at ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::backup::VisionRow {
+                rung: r.get(0)?,
+                asked_at: r.get(1)?,
+                correct: r.get::<_, i64>(2)? != 0,
+                millis: r.get::<_, i64>(3)? as u32,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn has_vision_attempt(&self, at: DateTime<Utc>) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM vision_attempts WHERE asked_at = ?1)",
+            params![at],
+            |r| r.get::<_, i64>(0),
+        )? != 0)
+    }
+
     pub fn export_drill_answers(&self) -> Result<Vec<crate::backup::DrillAnswerRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT puzzle_id, answered_at, found, misses
@@ -1728,12 +1811,43 @@ impl Store {
 
     /// Whether the trainer is re-testing solved puzzles rather than teaching
     /// new ones. Measurement is only meaningful while this is on.
+    /// Which way the Train tab is working: "learn", "repeat" or "vision".
+    ///
+    /// Derived from the old on/off `repeat_mode` when nothing else is stored,
+    /// so a database from before the third mode keeps the mode it was left in.
+    pub fn train_mode(&self) -> Result<String> {
+        if let Some(mode) = self.setting("train_mode")? {
+            return Ok(mode);
+        }
+        Ok(if self.setting("repeat_mode")?.as_deref() == Some("on") {
+            "repeat".to_owned()
+        } else {
+            "learn".to_owned()
+        })
+    }
+
+    pub fn set_train_mode(&self, mode: &str) -> Result<()> {
+        self.set_setting("train_mode", mode)
+    }
+
+    /// Whether the trainer is re-testing rather than teaching. Every
+    /// measurement path reads this and none of them needs to know a third mode
+    /// exists.
     pub fn repeat_mode(&self) -> Result<bool> {
-        Ok(self.setting("repeat_mode")?.as_deref() == Some("on"))
+        Ok(self.train_mode()? == "repeat")
     }
 
     pub fn set_repeat_mode(&self, on: bool) -> Result<()> {
-        self.set_setting("repeat_mode", if on { "on" } else { "off" })
+        self.set_train_mode(if on { "repeat" } else { "learn" })
+    }
+
+    /// The rung the ladder has been climbed to.
+    pub fn vision_rung(&self) -> Result<String> {
+        Ok(self.setting("vision_rung")?.unwrap_or_else(|| "colour".to_owned()))
+    }
+
+    pub fn set_vision_rung(&self, rung: &str) -> Result<()> {
+        self.set_setting("vision_rung", rung)
     }
 
     /// Whether the trainer draws only from positions taken out of your own

@@ -38,6 +38,9 @@ pub struct Backup {
     /// Absent in backups written before the exercise asked for the move.
     #[serde(default)]
     pub drill_answers: Vec<DrillAnswerRow>,
+    /// Board-vision answers, absent in backups written before the ladder.
+    #[serde(default)]
+    pub vision: Vec<VisionRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -62,6 +65,14 @@ pub struct DrillRow {
     /// The engine's line, absent in backups written before it was kept.
     #[serde(default)]
     pub best_line: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VisionRow {
+    pub rung: String,
+    pub asked_at: DateTime<Utc>,
+    pub correct: bool,
+    pub millis: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -204,6 +215,7 @@ pub fn export(store: &Store) -> Result<String> {
         drill_positions: store.export_drill_positions()?,
         drill_attempts: store.export_drill_attempts()?,
         drill_answers: store.export_drill_answers()?,
+        vision: store.export_vision()?,
     };
     serde_json::to_string_pretty(&backup).context("serialising the backup")
 }
@@ -279,6 +291,20 @@ pub fn restore(store: &mut Store, json: &str) -> Result<RestoreReport> {
                 // game it came from is somewhere else, or nowhere.
                 game_id: None,
             },
+        )?;
+        report.drills_written += 1;
+    }
+
+    for row in &backup.vision {
+        if store.has_vision_attempt(row.asked_at)? {
+            report.drills_skipped += 1;
+            continue;
+        }
+        store.record_vision(
+            &row.rung,
+            row.asked_at,
+            row.correct,
+            std::time::Duration::from_millis(u64::from(row.millis)),
         )?;
         report.drills_written += 1;
     }
@@ -542,6 +568,7 @@ mod tests {
             "drill_positions",
             "drill_attempts",
             "drill_answers",
+            "vision_attempts",
         ];
 
         let mut tables: Vec<&str> = crate::store::SCHEMA
