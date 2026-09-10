@@ -20,6 +20,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use shakmaty::san::SanPlus;
 use shakmaty::{attacks, Bitboard, Board, Chess, Color, Piece, Position, Role, Square};
 
 /// A step on the ladder. The order is the order they are climbed.
@@ -37,6 +38,10 @@ pub enum Rung {
     IsAttacked,
     /// A move given in notation, the board left where it was.
     AfterOneMove,
+    /// A move written down: which piece does it mean?
+    ReadNotation,
+    /// A move played on the board: what is it called?
+    WriteNotation,
     /// A real position: which of your pieces are hanging?
     Hanging,
     /// A real position, shown and then taken away.
@@ -44,13 +49,15 @@ pub enum Rung {
 }
 
 impl Rung {
-    pub const LADDER: [Rung; 8] = [
+    pub const LADDER: [Rung; 10] = [
         Rung::SquareColour,
         Rung::FindSquare,
         Rung::KnightReach,
         Rung::LineReach,
         Rung::IsAttacked,
         Rung::AfterOneMove,
+        Rung::ReadNotation,
+        Rung::WriteNotation,
         Rung::Hanging,
         Rung::Recall,
     ];
@@ -61,7 +68,17 @@ impl Rung {
     /// and the difference is most of why the low rungs do not feel like
     /// learning anything.
     pub fn wants_a_real_position(self) -> bool {
-        matches!(self, Rung::Hanging | Rung::Recall)
+        matches!(
+            self,
+            Rung::Hanging | Rung::Recall | Rung::ReadNotation | Rung::WriteNotation
+        )
+    }
+
+    /// Whether the answer is typed rather than clicked. Notation has to be
+    /// written to be learned: reading it is recognition, and recognition is
+    /// not what writing a line out of your head asks for.
+    pub fn is_written(self) -> bool {
+        self == Rung::WriteNotation
     }
 
     pub fn label(self) -> &'static str {
@@ -72,6 +89,8 @@ impl Rung {
             Rung::LineReach => "Line pieces",
             Rung::IsAttacked => "Is it attacked?",
             Rung::AfterOneMove => "One move ahead",
+            Rung::ReadNotation => "Read the notation",
+            Rung::WriteNotation => "Write the notation",
             Rung::Hanging => "What is hanging",
             Rung::Recall => "From memory",
         }
@@ -86,6 +105,8 @@ impl Rung {
             Rung::LineReach => "line",
             Rung::IsAttacked => "attacked",
             Rung::AfterOneMove => "ahead",
+            Rung::ReadNotation => "read",
+            Rung::WriteNotation => "write",
             Rung::Hanging => "hanging",
             Rung::Recall => "recall",
         }
@@ -127,6 +148,8 @@ impl Rung {
             Rung::KnightReach | Rung::LineReach => Duration::from_secs(12),
             Rung::IsAttacked => Duration::from_secs(6),
             Rung::AfterOneMove => Duration::from_secs(20),
+            Rung::ReadNotation => Duration::from_secs(10),
+            Rung::WriteNotation => Duration::from_secs(15),
             Rung::Hanging => Duration::from_secs(25),
             Rung::Recall => Duration::from_secs(15),
         }
@@ -160,6 +183,8 @@ pub enum Answer {
     Yes,
     No,
     Squares(BTreeSet<Square>),
+    /// A move written the way a player writes it.
+    Written(String),
 }
 
 /// One question, and the board to show while asking it.
@@ -178,7 +203,17 @@ pub struct Drill {
 
 /// Whether an answer is the right one.
 pub fn judge(drill: &Drill, given: &Answer) -> bool {
-    drill.answer == *given
+    match (&drill.answer, given) {
+        // Notation is compared as notation. The check and mate marks are
+        // accepted either way — writing Nf3 for Nf3+ is knowing the move and
+        // not yet the habit, and the answer shown afterwards carries the mark
+        // so the habit arrives.
+        (Answer::Written(want), Answer::Written(got)) => {
+            let bare = |text: &str| text.trim().trim_end_matches(['+', '#']).to_owned();
+            want.trim() == got.trim() || bare(want) == bare(got)
+        }
+        (a, b) => a == b,
+    }
 }
 
 /// Whether this rung has been climbed.
@@ -344,6 +379,42 @@ pub fn next_on(rung: Rung, seed: u64, sample: Option<&Chess>) -> Drill {
                 board,
                 shown_move: Some(format!("{from}{to}")),
                 answer: Answer::Squares(squares(attacks::attacks(to, white(role), after))),
+            }
+        }
+        Rung::ReadNotation => {
+            let position = sample.cloned().unwrap_or_default();
+            let legal = position.legal_moves();
+            let mv = legal
+                .get(rng.below(legal.len().max(1) as u64) as usize)
+                .copied()
+                .unwrap_or_else(|| position.legal_moves()[0]);
+            let written = SanPlus::from_move(position.clone(), mv).to_string();
+            // Which piece it means, not where it lands. Landing squares are
+            // coordinates, which is the previous skill; working out *which*
+            // knight is the one notation actually asks of you.
+            Drill {
+                rung,
+                prompt: format!("{written} — click the piece that moves."),
+                board: position.board().clone(),
+                shown_move: Some(written),
+                answer: Answer::Squares(mv.from().into_iter().collect()),
+            }
+        }
+        Rung::WriteNotation => {
+            let position = sample.cloned().unwrap_or_default();
+            let legal = position.legal_moves();
+            let mv = legal
+                .get(rng.below(legal.len().max(1) as u64) as usize)
+                .copied()
+                .unwrap_or_else(|| position.legal_moves()[0]);
+            let written = SanPlus::from_move(position.clone(), mv).to_string();
+            let from = mv.from().map(|f| f.to_string()).unwrap_or_default();
+            Drill {
+                rung,
+                prompt: format!("{from} to {} — write it.", mv.to()),
+                board: position.board().clone(),
+                shown_move: mv.from().map(|f| format!("{f}{}", mv.to())),
+                answer: Answer::Written(written),
             }
         }
         Rung::Hanging => {
@@ -839,5 +910,109 @@ mod harder_rungs {
         assert!(Rung::Recall.wants_a_real_position());
         assert!(!Rung::SquareColour.wants_a_real_position());
         assert!(!Rung::AfterOneMove.wants_a_real_position());
+    }
+}
+
+#[cfg(test)]
+mod notation_rungs {
+    use super::*;
+    use shakmaty::fen::Fen;
+    use shakmaty::CastlingMode;
+
+    fn position(fen: &str) -> Chess {
+        fen.parse::<Fen>()
+            .expect("a legal fen")
+            .into_position(CastlingMode::Standard)
+            .expect("a legal position")
+    }
+
+    /// Board vision teaches where squares are. It does not teach that a
+    /// knight going to f3 is called Nf3, that a capture carries an x, that two
+    /// knights need saying which, or that castling is O-O. Calculate mode asks
+    /// for all of that, so the ladder has to cover it.
+    #[test]
+    fn reading_notation_asks_which_piece_moves_not_where_it_lands() {
+        // Knights on b1 and f1 both reach d2, so the notation has to say
+        // which. Knights on b1 and g1 share no square at all, which is what
+        // the first version of this used.
+        let both = position("4k3/8/8/8/8/8/8/1N1K1N2 w - - 0 1");
+        for seed in 0..300u64 {
+            let drill = next_on(Rung::ReadNotation, seed, Some(&both));
+            let Answer::Squares(want) = &drill.answer else {
+                panic!("reading notation should want the piece's square");
+            };
+            let square = *want.iter().next().expect("one square");
+            assert!(
+                both.board().piece_at(square).is_some(),
+                "seed {seed}: pointed at an empty square"
+            );
+            assert!(
+                drill.prompt.contains("piece that moves"),
+                "seed {seed}: {}",
+                drill.prompt
+            );
+        }
+    }
+
+    /// A disambiguated move does come up, or the rung never teaches the one
+    /// part of notation people actually get wrong.
+    #[test]
+    fn reading_notation_includes_moves_that_must_say_which_piece() {
+        let both = position("4k3/8/8/8/8/8/8/1N1K1N2 w - - 0 1");
+        let asked: Vec<String> = (0..300u64)
+            .map(|seed| next_on(Rung::ReadNotation, seed, Some(&both)).prompt)
+            .collect();
+        assert!(
+            asked.iter().any(|p| p.starts_with("Nbd2") || p.starts_with("Nfd2")),
+            "no disambiguated move was ever asked: {:?}",
+            &asked[..5.min(asked.len())]
+        );
+    }
+
+    /// Writing is the direction calculate mode needs, and it is graded as
+    /// notation rather than as a square.
+    #[test]
+    fn writing_notation_is_graded_as_notation() {
+        let start = Chess::default();
+        let drill = next_on(Rung::WriteNotation, 7, Some(&start));
+        let Answer::Written(want) = &drill.answer else {
+            panic!("writing notation should want text");
+        };
+        assert!(judge(&drill, &Answer::Written(want.clone())));
+        assert!(!judge(&drill, &Answer::Written("nonsense".to_owned())));
+        // Whitespace either side is a typist, not a mistake.
+        assert!(judge(&drill, &Answer::Written(format!("  {want}  "))));
+    }
+
+    /// Leaving off the check mark is knowing the move and not yet the habit.
+    /// It counts, and the answer shown afterwards carries the mark.
+    #[test]
+    fn a_missing_check_mark_still_counts() {
+        let checking = position("4k3/8/8/8/8/8/8/R3K3 w - - 0 1");
+        let drill = Drill {
+            rung: Rung::WriteNotation,
+            prompt: String::new(),
+            board: checking.board().clone(),
+            shown_move: None,
+            answer: Answer::Written("Ra8+".to_owned()),
+        };
+        assert!(judge(&drill, &Answer::Written("Ra8+".to_owned())));
+        assert!(judge(&drill, &Answer::Written("Ra8".to_owned())));
+        assert!(!judge(&drill, &Answer::Written("Rb8".to_owned())));
+        // Case matters: files are lower, pieces upper, and "ra8" is not a move.
+        assert!(!judge(&drill, &Answer::Written("ra8".to_owned())));
+    }
+
+    /// The notation rungs sit below the ones that need them and above the
+    /// geometry, and both want a real position to ask about.
+    #[test]
+    fn notation_sits_between_geometry_and_the_hard_rungs() {
+        let at = |rung: Rung| Rung::LADDER.iter().position(|r| *r == rung).unwrap();
+        assert!(at(Rung::AfterOneMove) < at(Rung::ReadNotation));
+        assert!(at(Rung::ReadNotation) < at(Rung::WriteNotation));
+        assert!(Rung::ReadNotation.wants_a_real_position());
+        assert!(Rung::WriteNotation.wants_a_real_position());
+        assert!(Rung::WriteNotation.is_written());
+        assert!(!Rung::ReadNotation.is_written(), "reading is clicked");
     }
 }

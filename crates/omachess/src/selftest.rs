@@ -1354,6 +1354,65 @@ pub fn run(pieces: Option<Rc<PieceSet>>, filter: Option<&str>) -> bool {
         )
     }));
 
+    // Board vision teaches where squares are. It does not teach that a knight
+    // going to f3 is called Nf3, that two knights need saying which, or that
+    // a capture carries an x — and calculate mode asks for all of it. The
+    // ladder covers notation in both directions before it gets there.
+    checks.push(check("the ladder teaches writing notation, not just squares", || {
+        use omachess_core::vision::Rung;
+        let store = Rc::new(RefCell::new(seeded_store()?));
+        store.borrow().set_vision_rung("write").map_err(|e| e.to_string())?;
+        let trainer = Trainer::new(store.clone(), pieces.clone(), None);
+        trainer.choose_mode("vision");
+
+        let wanted = trainer.vision_written_answer();
+        expect(
+            !wanted.is_empty(),
+            "the writing rung asked for no notation at all",
+        )?;
+        // A move, not a square: "e4" is a square and also a move, so the
+        // check looks for something only notation produces.
+        expect(
+            trainer.vision_prompt().contains("write it"),
+            &format!("the prompt did not ask for notation: {:?}", trainer.vision_prompt()),
+        )?;
+
+        trainer.write_line(&wanted);
+        trainer.press_commit();
+        let (asked, right) = store
+            .borrow()
+            .vision_record("write")
+            .map_err(|e| e.to_string())?;
+        expect(
+            (asked, right) == (1, 1),
+            &format!("writing the move correctly scored {right} of {asked}"),
+        )?;
+
+        // And a wrong one is refused. Writing only the right answer passed
+        // even with the comparison replaced by `true`.
+        expect(
+            pump(10, || !trainer.vision_written_answer().is_empty()),
+            "no second question was dealt",
+        )?;
+        trainer.write_line("Zz9");
+        trainer.press_commit();
+        let (asked, right) = store
+            .borrow()
+            .vision_record("write")
+            .map_err(|e| e.to_string())?;
+        expect(
+            (asked, right) == (2, 1),
+            &format!("nonsense notation scored {right} right of {asked} asked"),
+        )?;
+
+        // And the reading rung is clicked, not typed, so the two directions
+        // are actually different exercises.
+        expect(
+            !Rung::ReadNotation.is_written() && Rung::WriteNotation.is_written(),
+            "reading and writing notation are the same exercise",
+        )
+    }));
+
     // --- calculate: the line before the board moves ------------------------
     //
     // The puzzle trainer answers one move at a time, immediately, which lets a

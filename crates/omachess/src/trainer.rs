@@ -71,6 +71,9 @@ fn describe_answer(drill: &omachess_core::vision::Drill) -> String {
             named.sort();
             named.join(" ")
         }
+        // With the mark, so leaving it off is learned rather than just
+        // forgiven.
+        Answer::Written(text) => format!("It is {text}."),
     }
 }
 
@@ -567,6 +570,15 @@ impl Trainer {
             .unwrap_or_default()
     }
 
+    /// The notation the writing rung is waiting for.
+    pub(crate) fn vision_written_answer(&self) -> String {
+        let held = self.vision.borrow();
+        match held.as_ref().map(|v| &v.drill.answer) {
+            Some(Answer::Written(text)) => text.clone(),
+            _ => String::new(),
+        }
+    }
+
     pub(crate) fn vision_side_for(&self, want_correct: bool) -> Option<VisionSide> {
         let held = self.vision.borrow();
         let drill = &held.as_ref()?.drill;
@@ -675,6 +687,13 @@ impl Trainer {
 
     /// Read the written line, say where it broke, then play the real one out.
     fn commit_line(self: &Rc<Self>) {
+        // The same box serves the written rung and calculate mode, so it goes
+        // wherever a question is actually waiting.
+        if self.vision.borrow().is_some() {
+            let written = self.line_entry.text().to_string();
+            self.grade_vision(&Answer::Written(written));
+            return;
+        }
         let Some((puzzle, position, began)) = self.calculating.borrow_mut().take() else {
             return;
         };
@@ -827,6 +846,10 @@ impl Trainer {
             drill.answer,
             Answer::Light | Answer::Dark | Answer::Yes | Answer::No
         );
+        // Notation has to be written to be learned. Reading it is
+        // recognition, and recognition is not what writing a line out of your
+        // head asks for.
+        let typed = drill.rung.is_written();
         let (a, b) = match drill.rung {
             Rung::SquareColour => ("Light", "Dark"),
             _ => ("Yes", "No"),
@@ -835,8 +858,20 @@ impl Trainer {
         self.vision_b.set_label(b);
         self.vision_a.set_visible(two_way);
         self.vision_b.set_visible(two_way);
-        self.vision_done.set_visible(!two_way);
-        self.vision_row().set_visible(true);
+        self.vision_done.set_visible(!two_way && !typed);
+        self.vision_row().set_visible(!typed);
+        self.calc_row().set_visible(typed);
+        if typed {
+            self.line_entry.set_text("");
+            self.line_entry.grab_focus();
+            // The move is shown on the board, since the question is what it
+            // is called and not which move it is.
+            if let Some(shown) = drill.shown_move.as_ref() {
+                if let (Ok(from), Ok(to)) = (shown[0..2].parse(), shown[2..4].parse()) {
+                    self.board.set_last_move(Some((from, to)));
+                }
+            }
+        }
 
         *self.vision.borrow_mut() = Some(VisionDrill {
             drill,
@@ -909,6 +944,7 @@ impl Trainer {
             }
         }
 
+        self.calc_row().set_visible(false);
         if right {
             self.status.set_label(&format!("Right — {:.1}s", took.as_secs_f64()));
         } else {
